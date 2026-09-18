@@ -1,0 +1,6 @@
+{
+  "name": "SQL Server to PostgreSQL Sync Engine",
+  "description": "Real-time background service pipeline to push and synchronize data from local SQL Server to virtual server PostgreSQL.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
