@@ -55,11 +55,11 @@ export default function App() {
 
   // Configs
   const [mssqlConfig, setMssqlConfig] = useState<MssqlConfig>({
-    host: '127.0.0.1',
+    host: 'DESKTOP-VDGDM3P',
     port: 1433,
-    database: 'ProductionERP',
+    database: 'varanashiinn',
     user: 'sa',
-    encrypt: true,
+    encrypt: false,
     trustServerCertificate: true,
     syncMode: 'cdc',
     pollIntervalMs: 800,

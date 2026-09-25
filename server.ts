@@ -1,5 +1,6 @@
 import express from 'express';
 import path from 'path';
+import fs from 'fs';
 import { createServer as createViteServer } from 'vite';
 import pg from 'pg';
 
@@ -2856,11 +2857,26 @@ CREATE INDEX IF NOT EXISTS idx_roomavail_dates ON public.trans_roomavailability_
   });
 
   // Serve sync_agent.js
-  app.get('/api/sync_agent.js', (req, res) => {
-    res.setHeader('Content-Disposition', 'attachment; filename="sync_agent.js"');
-    res.setHeader('Content-Type', 'application/javascript');
-    res.sendFile(path.join(process.cwd(), 'sync_agent.js'));
-  });
+  const sendSyncAgent = (req: express.Request, res: express.Response) => {
+    try {
+      const filePath = path.join(process.cwd(), 'sync_agent.js');
+      if (fs.existsSync(filePath)) {
+        const content = fs.readFileSync(filePath, 'utf8');
+        res.setHeader('Content-Disposition', 'attachment; filename="sync_agent.js"');
+        res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+        res.type('text/javascript').send(content);
+      } else {
+        res.status(404).send('// sync_agent.js not found');
+      }
+    } catch (err: unknown) {
+      res.status(500).send(`// Error reading sync_agent.js: ${err}`);
+    }
+  };
+
+  app.get('/api/sync_agent.js', sendSyncAgent);
+  app.get('/api/sync-agent.js', sendSyncAgent);
+  app.get('/sync_agent.js', sendSyncAgent);
+  app.get('/sync-agent.js', sendSyncAgent);
 
   // Vite middleware for development
   if (process.env.NODE_ENV !== 'production') {

@@ -70,8 +70,8 @@ export const SyncUnitPanel: React.FC<SyncUnitPanelProps> = ({
   onRefreshParity,
   postgresHost = '72.61.240.34',
   postgresDb = 'BOOKLOGIC',
-  mssqlHost = '127.0.0.1',
-  mssqlDb = 'BOOKLOGIC',
+  mssqlHost = 'DESKTOP-VDGDM3P',
+  mssqlDb = 'varanashiinn',
 }) => {
   const [selectedTable, setSelectedTable] = useState<string>('mas_hotel');
   const [isPushing, setIsPushing] = useState(false);
@@ -745,23 +745,43 @@ export const SyncUnitPanel: React.FC<SyncUnitPanelProps> = ({
 
   // Standalone Node.js Bidirectional Sync Agent Script
   const localAgentScript = `/**
- * BOOKLOGIC SQL Server ➔ VPS PostgreSQL Bidirectional Sync Unit Agent
+ * BOOKLOGIC SQL Server ➔ VPS PostgreSQL Bidirectional Sync Unit Agent (sync_agent.js)
  * 1. OUTBOUND: Auto-syncs mas_hotel & trans_roomavailability_chart_datewise to VPS (marks uploadflg = 1 in SQL Server)
- * 2. INBOUND: Auto-syncs reservations from VPS PostgreSQL into local SQL Server dbo.reservations_booklogic
+ * 2. INBOUND: Auto-syncs reservations (3 relational tables) from VPS PostgreSQL into local SQL Server
  */
 const sql = require('mssql');
 const { Pool } = require('pg');
+
+function parseSqlServerServer(rawServer, rawPort) {
+  let serverStr = (rawServer || '127.0.0.1').trim();
+  let instanceName = undefined;
+  let port = rawPort ? parseInt(rawPort, 10) : 1433;
+
+  if (serverStr.includes('\\\\')) {
+    const parts = serverStr.split('\\\\');
+    serverStr = parts[0] || '127.0.0.1';
+    instanceName = parts[1];
+    port = rawPort ? parseInt(rawPort, 10) : undefined;
+  }
+  return { server: serverStr, instanceName, port };
+}
+
+const parsedMssql = parseSqlServerServer('${mssqlHost}', '1433');
 
 // 1. Local SQL Server (Source / Target)
 const mssqlConfig = {
   user: 'sa',
   password: 'mgenn@123',
-  server: 'DESKTOP-VDGDM3P', // or '127.0.0.1'
-  port: 1433,
+  server: parsedMssql.server,
+  port: parsedMssql.port,
   database: '${mssqlDb}',
   options: {
+    instanceName: parsedMssql.instanceName,
     encrypt: false,
     trustServerCertificate: true,
+    enableArithAbort: true,
+    connectTimeout: 15000,
+    requestTimeout: 30000,
   },
 };
 
@@ -777,50 +797,63 @@ const pgPool = new Pool({
 
 let sqlPool = null;
 
+function safeDate(val) {
+  if (!val) return null;
+  if (val instanceof Date) return isNaN(val.getTime()) ? null : val;
+  const d = new Date(val);
+  return isNaN(d.getTime()) ? null : d;
+}
+
+function safeNum(val, defaultVal = 0) {
+  if (val === null || val === undefined || val === '') return defaultVal;
+  const n = Number(val);
+  return isNaN(n) ? defaultVal : n;
+}
+
 // A. OUTBOUND: Sync Hotel Master (mas_hotel) -> PostgreSQL
 async function syncMasHotel(pgClient) {
   try {
-    const result = await sqlPool.request().query('SELECT * FROM dbo.mas_hotel WHERE ISNULL(inactive, 0) = 0');
+    const result = await sqlPool.request().query('SELECT * FROM dbo.mas_hotel');
     if (!result.recordset || result.recordset.length === 0) return 0;
 
+    let upserted = 0;
     for (const row of result.recordset) {
-      const hotelCode = row.HotelCode || row.hotelcode;
+      const hotelCode = (row.HotelCode || row.hotelcode || row.Hotel_Code || row.hotel_code || row.code || '').toString().trim();
       if (!hotelCode) continue;
 
       const query = \`
-        INSERT INTO mas_hotel (
-          hotelname, hotelcode, username, password,
-          inactive, sql_servername, sql_username, sql_password,
-          sql_database, iscloudfo, irm_only
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+        INSERT INTO public.mas_hotel (
+          hotelname, hotelcode, city, state, country,
+          phone, email, totalrooms, starrating, isactive
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
         ON CONFLICT (hotelcode) DO UPDATE SET
           hotelname = EXCLUDED.hotelname,
-          username = EXCLUDED.username,
-          password = EXCLUDED.password,
-          inactive = EXCLUDED.inactive,
-          sql_servername = EXCLUDED.sql_servername,
-          sql_username = EXCLUDED.sql_username,
-          sql_password = EXCLUDED.sql_password,
-          sql_database = EXCLUDED.sql_database,
-          iscloudfo = EXCLUDED.iscloudfo,
-          irm_only = EXCLUDED.irm_only;
+          city = EXCLUDED.city,
+          state = EXCLUDED.state,
+          country = EXCLUDED.country,
+          phone = EXCLUDED.phone,
+          email = EXCLUDED.email,
+          totalrooms = EXCLUDED.totalrooms,
+          starrating = EXCLUDED.starrating,
+          isactive = EXCLUDED.isactive,
+          modifiedat = CURRENT_TIMESTAMP;
       \`;
 
       await pgClient.query(query, [
-        row.HotelName || row.hotelname || '',
+        (row.HotelName || row.hotelname || 'Hotel ' + hotelCode).toString(),
         hotelCode,
-        row.Username || row.username || null,
-        row.Password || row.password || null,
-        row.Inactive !== undefined ? row.Inactive : 0,
-        row.Sql_ServerName || row.sql_servername || '127.0.0.1',
-        row.Sql_UserName || row.sql_username || 'sa',
-        row.Sql_Password || row.sql_password || null,
-        row.Sql_Database || row.sql_database || 'BOOKLOGIC',
-        row.IsCloudFo !== undefined ? row.IsCloudFo : null,
-        row.IRM_Only !== undefined ? row.IRM_Only : null,
+        (row.City || row.city || '').toString(),
+        (row.State || row.state || '').toString(),
+        (row.Country || row.country || 'India').toString(),
+        (row.Phone || row.phone || '').toString(),
+        (row.Email || row.email || '').toString(),
+        safeNum(row.TotalRooms || row.totalrooms, 0),
+        safeNum(row.StarRating || row.starrating, 4.5),
+        row.IsActive !== undefined ? Boolean(row.IsActive) : true,
       ]);
+      upserted++;
     }
-    return result.recordset.length;
+    return upserted;
   } catch (err) {
     console.error('Hotel sync error:', err.message);
     return 0;
@@ -830,7 +863,7 @@ async function syncMasHotel(pgClient) {
 // B. OUTBOUND: Sync Room Availability -> PostgreSQL & mark uploadflg = 1 in SQL Server
 async function syncRoomAvailability(pgClient) {
   try {
-    const result = await sqlPool.request().query('SELECT * FROM dbo.trans_roomavailability_chart_datewise WHERE ISNULL(uploadflg, 0) = 0');
+    const result = await sqlPool.request().query('SELECT TOP (200) * FROM dbo.trans_roomavailability_chart_datewise WHERE ISNULL(uploadflg, 0) = 0 ORDER BY avaidd ASC');
     if (!result.recordset || result.recordset.length === 0) return 0;
 
     const syncedAvaids = [];
@@ -839,33 +872,43 @@ async function syncRoomAvailability(pgClient) {
       if (!row.avaidd) continue;
 
       const query = \`
-        INSERT INTO trans_roomavailability_chart_datewise (
+        INSERT INTO public.trans_roomavailability_chart_datewise (
           avaidd, roomtypeid, fromdate, todate, availablerooms,
           uploadflg, notupload, remarks, fromtime, totime,
           allotcode, hotelcode, irm_update, stopsales
-        ) OVERRIDING SYSTEM VALUE VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
         ON CONFLICT (avaidd) DO UPDATE SET
+          roomtypeid = EXCLUDED.roomtypeid,
+          fromdate = EXCLUDED.fromdate,
+          todate = EXCLUDED.todate,
           availablerooms = EXCLUDED.availablerooms,
+          uploadflg = 1,
+          notupload = EXCLUDED.notupload,
           remarks = EXCLUDED.remarks,
+          fromtime = EXCLUDED.fromtime,
+          totime = EXCLUDED.totime,
+          allotcode = EXCLUDED.allotcode,
+          hotelcode = EXCLUDED.hotelcode,
+          irm_update = EXCLUDED.irm_update,
           stopsales = EXCLUDED.stopsales,
-          uploadflg = 1;
+          last_synced_at = CURRENT_TIMESTAMP;
       \`;
 
       await pgClient.query(query, [
         row.avaidd,
         row.Roomtypeid || row.roomtypeid || null,
-        row.fromdate || null,
-        row.todate || null,
-        row.Availablerooms !== undefined ? row.Availablerooms : (row.availablerooms || 0),
+        safeDate(row.fromdate),
+        safeDate(row.todate),
+        safeNum(row.Availablerooms !== undefined ? row.Availablerooms : row.availablerooms, 0),
         1,
         row.notupload ? String(row.notupload) : null,
         row.Remarks || row.remarks || '',
-        row.Fromtime || row.fromtime || null,
-        row.Totime || row.totime || null,
-        row.allotcode || '',
-        row.hotelcode || '',
-        row.IRM_Update !== undefined ? row.IRM_Update : 0,
-        row.stopsales !== undefined ? row.stopsales : 0,
+        safeDate(row.Fromtime || row.fromtime),
+        safeDate(row.Totime || row.totime),
+        (row.allotcode || '').toString(),
+        (row.hotelcode || '').toString(),
+        safeNum(row.IRM_Update !== undefined ? row.IRM_Update : row.irm_update, 0),
+        safeNum(row.stopsales !== undefined ? row.stopsales : 0, 0),
       ]);
 
       syncedAvaids.push(row.avaidd);
@@ -877,7 +920,7 @@ async function syncRoomAvailability(pgClient) {
         const chunk = syncedAvaids.slice(i, i + chunkSize);
         await sqlPool.request().query(\`
           UPDATE dbo.trans_roomavailability_chart_datewise
-          SET uploadflg = 1
+          SET uploadflg = 1, _last_updated = GETDATE()
           WHERE avaidd IN (\${chunk.join(',')})
         \`);
       }
@@ -892,227 +935,322 @@ async function syncRoomAvailability(pgClient) {
 }
 
 // C. INBOUND: 3-Table Relational Sync (PostgreSQL ➔ Local SQL Server)
-// Link Field: res_id | Condition: updateflag = 0 and Hotelcode in mas_hotel
-// Target Tables: Reservations_booklogic, reservations_details_booklogic, reservation_Customer_booklogic
 async function syncInboundReservations3Tables(pgClient) {
   try {
     // 1. Ensure 3 relational tables exist in Local SQL Server
-    await sqlPool.request().query(\`
-      IF NOT EXISTS (SELECT * FROM sysobjects WHERE name='Reservations_booklogic' AND xtype='U')
-      CREATE TABLE dbo.Reservations_booklogic (
-        res_id BIGINT PRIMARY KEY,
-        hotelcode NVARCHAR(100),
-        booking_date DATETIME DEFAULT GETDATE(),
-        check_in DATETIME,
-        check_out DATETIME,
-        rooms_booked INT DEFAULT 1,
-        total_amount DECIMAL(18,2) DEFAULT 0.00,
-        currency NVARCHAR(10) DEFAULT 'INR',
-        status NVARCHAR(100) DEFAULT 'CONFIRMED',
-        special_requests NVARCHAR(MAX),
-        updateflag INT DEFAULT 1,
-        created_at DATETIME DEFAULT GETDATE(),
-        modified_at DATETIME DEFAULT GETDATE(),
-        _synced_at DATETIME DEFAULT GETDATE()
-      );
+    try {
+      await sqlPool.request().query(\`
+        IF NOT EXISTS (SELECT * FROM sysobjects WHERE name='Reservations_booklogic' AND xtype='U')
+        CREATE TABLE dbo.Reservations_booklogic (
+          res_id BIGINT PRIMARY KEY,
+          hotelcode NVARCHAR(100),
+          booking_date DATETIME DEFAULT GETDATE(),
+          check_in DATETIME,
+          check_out DATETIME,
+          rooms_booked INT DEFAULT 1,
+          total_amount DECIMAL(18,2) DEFAULT 0.00,
+          currency NVARCHAR(10) DEFAULT 'INR',
+          status NVARCHAR(100) DEFAULT 'CONFIRMED',
+          special_requests NVARCHAR(MAX),
+          updateflag INT DEFAULT 1,
+          created_at DATETIME DEFAULT GETDATE(),
+          modified_at DATETIME DEFAULT GETDATE(),
+          _synced_at DATETIME DEFAULT GETDATE()
+        );
 
-      IF NOT EXISTS (SELECT * FROM sysobjects WHERE name='reservations_details_booklogic' AND xtype='U')
-      CREATE TABLE dbo.reservations_details_booklogic (
-        detail_id BIGINT PRIMARY KEY,
-        res_id BIGINT FOREIGN KEY REFERENCES dbo.Reservations_booklogic(res_id) ON DELETE CASCADE,
-        roomtypeid BIGINT,
-        room_type_name NVARCHAR(150),
-        rooms_booked INT DEFAULT 1,
-        rate_plan_code NVARCHAR(50) DEFAULT 'BAR',
-        price_per_night DECIMAL(18,2) DEFAULT 0.00,
-        tax_amount DECIMAL(18,2) DEFAULT 0.00,
-        meal_plan NVARCHAR(50) DEFAULT 'EP',
-        adults INT DEFAULT 1,
-        children INT DEFAULT 0,
-        nights INT DEFAULT 1,
-        check_in DATETIME,
-        check_out DATETIME,
-        _synced_at DATETIME DEFAULT GETDATE()
-      );
+        IF NOT EXISTS (SELECT * FROM sysobjects WHERE name='reservations_details_booklogic' AND xtype='U')
+        CREATE TABLE dbo.reservations_details_booklogic (
+          detail_id BIGINT PRIMARY KEY,
+          res_id BIGINT,
+          roomtypeid BIGINT,
+          room_type_name NVARCHAR(150),
+          rooms_booked INT DEFAULT 1,
+          rate_plan_code NVARCHAR(50) DEFAULT 'BAR',
+          price_per_night DECIMAL(18,2) DEFAULT 0.00,
+          tax_amount DECIMAL(18,2) DEFAULT 0.00,
+          meal_plan NVARCHAR(50) DEFAULT 'EP',
+          adults INT DEFAULT 1,
+          children INT DEFAULT 0,
+          nights INT DEFAULT 1,
+          check_in DATETIME,
+          check_out DATETIME,
+          _synced_at DATETIME DEFAULT GETDATE()
+        );
 
-      IF NOT EXISTS (SELECT * FROM sysobjects WHERE name='reservation_Customer_booklogic' AND xtype='U')
-      CREATE TABLE dbo.reservation_Customer_booklogic (
-        customer_id BIGINT PRIMARY KEY,
-        res_id BIGINT FOREIGN KEY REFERENCES dbo.Reservations_booklogic(res_id) ON DELETE CASCADE,
-        first_name NVARCHAR(100),
-        last_name NVARCHAR(100),
-        customer_name NVARCHAR(200),
-        phone NVARCHAR(100),
-        email NVARCHAR(200),
-        address NVARCHAR(MAX),
-        city NVARCHAR(100),
-        country NVARCHAR(100) DEFAULT 'India',
-        id_proof_type NVARCHAR(50),
-        id_proof_number NVARCHAR(100),
-        _synced_at DATETIME DEFAULT GETDATE()
-      );
-    \`);
+        IF NOT EXISTS (SELECT * FROM sysobjects WHERE name='reservation_Customer_booklogic' AND xtype='U')
+        CREATE TABLE dbo.reservation_Customer_booklogic (
+          customer_id BIGINT PRIMARY KEY,
+          res_id BIGINT,
+          first_name NVARCHAR(100),
+          last_name NVARCHAR(100),
+          customer_name NVARCHAR(200),
+          phone NVARCHAR(100),
+          email NVARCHAR(200),
+          address NVARCHAR(MAX),
+          city NVARCHAR(100),
+          country NVARCHAR(100) DEFAULT 'India',
+          id_proof_type NVARCHAR(50),
+          id_proof_number NVARCHAR(100),
+          _synced_at DATETIME DEFAULT GETDATE()
+        );
+      \`);
+    } catch (e) {
+      // ignore schema verification warnings
+    }
 
     // 2. Fetch local active hotels
-    const hotelRes = await sqlPool.request().query('SELECT HotelCode FROM dbo.mas_hotel');
-    const hotelCodes = hotelRes.recordset ? hotelRes.recordset.map(h => h.HotelCode || h.hotelcode).filter(Boolean) : [];
+    let hotelCodes = [];
+    try {
+      const hotelRes = await sqlPool.request().query('SELECT * FROM dbo.mas_hotel');
+      if (hotelRes.recordset && hotelRes.recordset.length > 0) {
+        hotelCodes = hotelRes.recordset
+          .map(h => (h.HotelCode || h.hotelcode || h.Hotel_Code || h.code || '').toString().trim().toUpperCase())
+          .filter(Boolean);
+      }
+    } catch (e) {}
 
-    // 3. Query un-synced reservations where updateflag is 0
-    let pgQuery = 'SELECT * FROM public.reservations WHERE COALESCE(updateflag, 0) = 0';
-    const params = [];
-    if (hotelCodes.length > 0) {
-      params.push(hotelCodes);
-      pgQuery += ' AND hotelcode = ANY($1)';
+    // 3. Dynamic Column Introspection on public.reservations
+    let resCols = new Set();
+    try {
+      const colCheck = await pgClient.query(\`
+        SELECT column_name
+        FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'reservations';
+      \`);
+      if (colCheck.rows && colCheck.rows.length > 0) {
+        colCheck.rows.forEach(r => resCols.add(r.column_name.toLowerCase()));
+      }
+    } catch (e) {}
+
+    if (resCols.size > 0) {
+      if (!resCols.has('hotelcode') && !resCols.has('hotel_code')) {
+        try {
+          await pgClient.query("ALTER TABLE public.reservations ADD COLUMN IF NOT EXISTS hotelcode VARCHAR(100) DEFAULT 'HTL-BL-001';");
+          resCols.add('hotelcode');
+        } catch (e) {}
+      }
+      if (!resCols.has('updateflag') && !resCols.has('update_flag')) {
+        try {
+          await pgClient.query("ALTER TABLE public.reservations ADD COLUMN IF NOT EXISTS updateflag INT DEFAULT 0;");
+          resCols.add('updateflag');
+        } catch (e) {}
+      }
     }
-    pgQuery += ' ORDER BY res_id ASC LIMIT 200';
 
-    const resResult = await pgClient.query(pgQuery, params);
+    const hotelCol = resCols.has('hotelcode') ? 'hotelcode' : (resCols.has('hotel_code') ? 'hotel_code' : null);
+    const updateFlagCol = resCols.has('updateflag') ? 'updateflag' : (resCols.has('update_flag') ? 'update_flag' : 'updateflag');
+    const pkCol = resCols.has('res_id') ? 'res_id' : (resCols.has('resid') ? 'resid' : (resCols.has('id') ? 'id' : 'res_id'));
+
+    // 4. Query un-synced reservations where updateflag is 0
+    let pgQuery = \`SELECT * FROM public.reservations WHERE COALESCE(\${updateFlagCol}, 0) = 0\`;
+    const params = [];
+    if (hotelCodes.length > 0 && hotelCol) {
+      params.push(hotelCodes);
+      pgQuery += \` AND UPPER(TRIM(CAST(\${hotelCol} AS VARCHAR))) = ANY($1)\`;
+    }
+    pgQuery += \` ORDER BY \${pkCol} ASC LIMIT 200\`;
+
+    let resResult;
+    try {
+      resResult = await pgClient.query(pgQuery, params);
+    } catch (qErr) {
+      resResult = await pgClient.query('SELECT * FROM public.reservations WHERE COALESCE(updateflag, 0) = 0 ORDER BY res_id ASC LIMIT 200');
+    }
+
     if (!resResult.rows || resResult.rows.length === 0) return 0;
 
-    const resIds = resResult.rows.map(r => Number(r.res_id));
+    const resIds = resResult.rows.map(r => Number(r.res_id || r.resid || r.id));
 
-    // 4. Fetch matching details and customers linked by res_id
-    const detailsResult = await pgClient.query(
-      'SELECT * FROM public.reservations_details WHERE res_id = ANY($1::bigint[]) ORDER BY detail_id ASC',
-      [resIds]
-    );
-    const custResult = await pgClient.query(
-      'SELECT * FROM public.reservation_customer WHERE res_id = ANY($1::bigint[]) ORDER BY customer_id ASC',
-      [resIds]
-    );
+    // 5. Fetch matching details and customers linked by res_id
+    let detailsRows = [];
+    try {
+      const detailsResult = await pgClient.query(
+        'SELECT * FROM public.reservations_details WHERE res_id = ANY($1) ORDER BY detail_id ASC',
+        [resIds]
+      );
+      detailsRows = detailsResult.rows || [];
+    } catch (e) {}
 
-    // 5. Upsert Master records into dbo.Reservations_booklogic
+    let custRows = [];
+    try {
+      const custResult = await pgClient.query(
+        'SELECT * FROM public.reservation_customer WHERE res_id = ANY($1) ORDER BY customer_id ASC',
+        [resIds]
+      );
+      custRows = custResult.rows || [];
+    } catch (e) {}
+
+    const detailsByRes = {};
+    for (const d of detailsRows) {
+      const rid = Number(d.res_id);
+      if (!detailsByRes[rid]) detailsByRes[rid] = [];
+      detailsByRes[rid].push(d);
+    }
+
+    const custByRes = {};
+    for (const c of custRows) {
+      const rid = Number(c.res_id);
+      if (!custByRes[rid]) custByRes[rid] = [];
+      custByRes[rid].push(c);
+    }
+
+    const successfulResIds = [];
+
+    // 6. Upsert Master & child records per reservation
     for (const r of resResult.rows) {
-      const req = sqlPool.request();
-      req.input('resId', sql.BigInt, r.res_id);
-      req.input('hotelcode', sql.NVarChar(100), r.hotelcode || 'HTL-BL-001');
-      req.input('bookingDate', sql.DateTime, r.booking_date ? new Date(r.booking_date) : new Date());
-      req.input('checkIn', sql.DateTime, r.check_in ? new Date(r.check_in) : null);
-      req.input('checkOut', sql.DateTime, r.check_out ? new Date(r.check_out) : null);
-      req.input('roomsBooked', sql.Int, r.rooms_booked || 1);
-      req.input('totalAmount', sql.Decimal(18, 2), r.total_amount || 0);
-      req.input('currency', sql.NVarChar(10), r.currency || 'INR');
-      req.input('status', sql.NVarChar(100), r.status || 'CONFIRMED');
-      req.input('specialRequests', sql.NVarChar(sql.MAX), r.special_requests || '');
+      const currentResId = Number(r.res_id || r.resid || r.id);
+      if (!currentResId) continue;
 
-      await req.query(\`
-        IF EXISTS (SELECT 1 FROM dbo.Reservations_booklogic WHERE res_id = @resId)
-        BEGIN
-          UPDATE dbo.Reservations_booklogic
-          SET hotelcode = @hotelcode, booking_date = @bookingDate, check_in = @checkIn,
-              check_out = @checkOut, rooms_booked = @roomsBooked, total_amount = @totalAmount,
-              currency = @currency, status = @status, special_requests = @specialRequests,
-              updateflag = 1, modified_at = GETDATE(), _synced_at = GETDATE()
-          WHERE res_id = @resId;
-        END
-        ELSE
-        BEGIN
-          INSERT INTO dbo.Reservations_booklogic (
-            res_id, hotelcode, booking_date, check_in, check_out,
-            rooms_booked, total_amount, currency, status, special_requests,
-            updateflag, created_at, modified_at, _synced_at
-          ) VALUES (
-            @resId, @hotelcode, @bookingDate, @checkIn, @checkOut,
-            @roomsBooked, @totalAmount, @currency, @status, @specialRequests,
-            1, GETDATE(), GETDATE(), GETDATE()
-          );
-        END
-      \`);
+      const rHotelCode = (r.hotelcode || r.hotel_code || r.HotelCode || 'HTL-BL-001').toString().trim();
+
+      try {
+        const reqMaster = sqlPool.request();
+        reqMaster.input('resId', sql.BigInt, currentResId);
+        reqMaster.input('hotelcode', sql.NVarChar(100), rHotelCode);
+        reqMaster.input('bookingDate', sql.DateTime, safeDate(r.booking_date || r.created_at) || new Date());
+        reqMaster.input('checkIn', sql.DateTime, safeDate(r.check_in));
+        reqMaster.input('checkOut', sql.DateTime, safeDate(r.check_out));
+        reqMaster.input('roomsBooked', sql.Int, safeNum(r.rooms_booked, 1));
+        reqMaster.input('totalAmount', sql.Decimal(18, 2), safeNum(r.total_amount, 0));
+        reqMaster.input('currency', sql.NVarChar(10), (r.currency || 'INR').toString());
+        reqMaster.input('status', sql.NVarChar(100), (r.status || 'CONFIRMED').toString());
+        reqMaster.input('specialRequests', sql.NVarChar(sql.MAX), (r.special_requests || r.remarks || '').toString());
+
+        await reqMaster.query(\`
+          IF EXISTS (SELECT 1 FROM dbo.Reservations_booklogic WHERE res_id = @resId)
+          BEGIN
+            UPDATE dbo.Reservations_booklogic
+            SET hotelcode = @hotelcode, booking_date = @bookingDate, check_in = @checkIn,
+                check_out = @checkOut, rooms_booked = @roomsBooked, total_amount = @totalAmount,
+                currency = @currency, status = @status, special_requests = @specialRequests,
+                updateflag = 1, modified_at = GETDATE(), _synced_at = GETDATE()
+            WHERE res_id = @resId;
+          END
+          ELSE
+          BEGIN
+            INSERT INTO dbo.Reservations_booklogic (
+              res_id, hotelcode, booking_date, check_in, check_out,
+              rooms_booked, total_amount, currency, status, special_requests,
+              updateflag, created_at, modified_at, _synced_at
+            ) VALUES (
+              @resId, @hotelcode, @bookingDate, @checkIn, @checkOut,
+              @roomsBooked, @totalAmount, @currency, @status, @specialRequests,
+              1, GETDATE(), GETDATE(), GETDATE()
+            );
+          END
+        \`);
+
+        // Details
+        const details = detailsByRes[currentResId] || [];
+        for (let idx = 0; idx < details.length; idx++) {
+          const d = details[idx];
+          const detailId = d.detail_id ? Number(d.detail_id) : (currentResId * 1000 + (idx + 1));
+          
+          const reqDtl = sqlPool.request();
+          reqDtl.input('detailId', sql.BigInt, detailId);
+          reqDtl.input('resId', sql.BigInt, currentResId);
+          reqDtl.input('roomtypeid', sql.BigInt, safeNum(d.roomtypeid, 101));
+          reqDtl.input('roomTypeName', sql.NVarChar(150), (d.room_type_name || 'Standard Room').toString());
+          reqDtl.input('roomsBooked', sql.Int, safeNum(d.rooms_booked, 1));
+          reqDtl.input('ratePlanCode', sql.NVarChar(50), (d.rate_plan_code || 'BAR').toString());
+          reqDtl.input('pricePerNight', sql.Decimal(18, 2), safeNum(d.price_per_night, 0));
+          reqDtl.input('taxAmount', sql.Decimal(18, 2), safeNum(d.tax_amount, 0));
+          reqDtl.input('mealPlan', sql.NVarChar(50), (d.meal_plan || 'EP').toString());
+          reqDtl.input('adults', sql.Int, safeNum(d.adults, 1));
+          reqDtl.input('children', sql.Int, safeNum(d.children, 0));
+          reqDtl.input('nights', sql.Int, safeNum(d.nights, 1));
+          reqDtl.input('checkIn', sql.DateTime, safeDate(d.check_in || r.check_in));
+          reqDtl.input('checkOut', sql.DateTime, safeDate(d.check_out || r.check_out));
+
+          await reqDtl.query(\`
+            IF EXISTS (SELECT 1 FROM dbo.reservations_details_booklogic WHERE detail_id = @detailId)
+            BEGIN
+              UPDATE dbo.reservations_details_booklogic
+              SET res_id = @resId, roomtypeid = @roomtypeid, room_type_name = @roomTypeName,
+                  rooms_booked = @roomsBooked, rate_plan_code = @ratePlanCode, price_per_night = @pricePerNight,
+                  tax_amount = @taxAmount, meal_plan = @mealPlan, adults = @adults, children = @children,
+                  nights = @nights, check_in = @checkIn, check_out = @checkOut, _synced_at = GETDATE()
+              WHERE detail_id = @detailId;
+            END
+            ELSE
+            BEGIN
+              INSERT INTO dbo.reservations_details_booklogic (
+                detail_id, res_id, roomtypeid, room_type_name,
+                rooms_booked, rate_plan_code, price_per_night, tax_amount,
+                meal_plan, adults, children, nights, check_in, check_out, _synced_at
+              ) VALUES (
+                @detailId, @resId, @roomtypeid, @roomTypeName,
+                @roomsBooked, @ratePlanCode, @pricePerNight, @taxAmount,
+                @mealPlan, @adults, @children, @nights, @checkIn, @checkOut, GETDATE()
+              );
+            END
+          \`);
+        }
+
+        // Customers
+        const customers = custByRes[currentResId] || [];
+        for (let idx = 0; idx < customers.length; idx++) {
+          const c = customers[idx];
+          const custId = c.customer_id ? Number(c.customer_id) : (currentResId * 1000 + (idx + 1));
+
+          const reqCust = sqlPool.request();
+          reqCust.input('custId', sql.BigInt, custId);
+          reqCust.input('resId', sql.BigInt, currentResId);
+          reqCust.input('firstName', sql.NVarChar(100), (c.first_name || '').toString());
+          reqCust.input('lastName', sql.NVarChar(100), (c.last_name || '').toString());
+          reqCust.input('customerName', sql.NVarChar(200), (c.customer_name || \`\${c.first_name || ''} \${c.last_name || ''}\`.trim() || 'Guest').toString());
+          reqCust.input('phone', sql.NVarChar(100), (c.phone || '').toString());
+          reqCust.input('email', sql.NVarChar(200), (c.email || '').toString());
+          reqCust.input('address', sql.NVarChar(sql.MAX), (c.address || '').toString());
+          reqCust.input('city', sql.NVarChar(100), (c.city || '').toString());
+          reqCust.input('country', sql.NVarChar(100), (c.country || 'India').toString());
+          reqCust.input('idProofType', sql.NVarChar(50), (c.id_proof_type || 'PASSPORT').toString());
+          reqCust.input('idProofNumber', sql.NVarChar(100), (c.id_proof_number || '').toString());
+
+          await reqCust.query(\`
+            IF EXISTS (SELECT 1 FROM dbo.reservation_Customer_booklogic WHERE customer_id = @custId)
+            BEGIN
+              UPDATE dbo.reservation_Customer_booklogic
+              SET res_id = @resId, first_name = @firstName, last_name = @lastName,
+                  customer_name = @customerName, phone = @phone, email = @email,
+                  address = @address, city = @city, country = @country,
+                  id_proof_type = @idProofType, id_proof_number = @idProofNumber, _synced_at = GETDATE()
+              WHERE customer_id = @custId;
+            END
+            ELSE
+            BEGIN
+              INSERT INTO dbo.reservation_Customer_booklogic (
+                customer_id, res_id, first_name, last_name, customer_name,
+                phone, email, address, city, country, id_proof_type, id_proof_number, _synced_at
+              ) VALUES (
+                @custId, @resId, @firstName, @lastName, @customerName,
+                @phone, @email, @address, @city, @country, @idProofType, @idProofNumber, GETDATE()
+              );
+            END
+          \`);
+        }
+
+        successfulResIds.push(currentResId);
+      } catch (recErr) {
+        console.error(\`Failed to sync reservation res_id=\${currentResId}: \${recErr.message}\`);
+      }
     }
 
-    // 6. Upsert Detail records into dbo.reservations_details_booklogic
-    for (const d of detailsResult.rows) {
-      const req = sqlPool.request();
-      req.input('detailId', sql.BigInt, d.detail_id);
-      req.input('resId', sql.BigInt, d.res_id);
-      req.input('roomtypeid', sql.BigInt, d.roomtypeid || 101);
-      req.input('roomTypeName', sql.NVarChar(150), d.room_type_name || 'Standard');
-      req.input('roomsBooked', sql.Int, d.rooms_booked || 1);
-      req.input('ratePlanCode', sql.NVarChar(50), d.rate_plan_code || 'BAR');
-      req.input('pricePerNight', sql.Decimal(18, 2), d.price_per_night || 0);
-      req.input('taxAmount', sql.Decimal(18, 2), d.tax_amount || 0);
-      req.input('mealPlan', sql.NVarChar(50), d.meal_plan || 'EP');
-      req.input('adults', sql.Int, d.adults || 1);
-      req.input('children', sql.Int, d.children || 0);
-      req.input('nights', sql.Int, d.nights || 1);
-      req.input('checkIn', sql.DateTime, d.check_in ? new Date(d.check_in) : null);
-      req.input('checkOut', sql.DateTime, d.check_out ? new Date(d.check_out) : null);
-
-      await req.query(\`
-        IF EXISTS (SELECT 1 FROM dbo.reservations_details_booklogic WHERE detail_id = @detailId)
-        BEGIN
-          UPDATE dbo.reservations_details_booklogic
-          SET res_id = @resId, roomtypeid = @roomtypeid, room_type_name = @roomTypeName,
-              rooms_booked = @roomsBooked, rate_plan_code = @ratePlanCode, price_per_night = @pricePerNight,
-              tax_amount = @taxAmount, meal_plan = @mealPlan, adults = @adults, children = @children,
-              nights = @nights, check_in = @checkIn, check_out = @checkOut, _synced_at = GETDATE()
-          WHERE detail_id = @detailId;
-        END
-        ELSE
-        BEGIN
-          INSERT INTO dbo.reservations_details_booklogic (
-            detail_id, res_id, roomtypeid, room_type_name,
-            rooms_booked, rate_plan_code, price_per_night, tax_amount,
-            meal_plan, adults, children, nights, check_in, check_out, _synced_at
-          ) VALUES (
-            @detailId, @resId, @roomtypeid, @roomTypeName,
-            @roomsBooked, @ratePlanCode, @pricePerNight, @taxAmount,
-            @mealPlan, @adults, @children, @nights, @checkIn, @checkOut, GETDATE()
-          );
-        END
-      \`);
+    // 7. Mark updateflag = 1 in PostgreSQL for successfully committed reservations
+    if (successfulResIds.length > 0) {
+      try {
+        await pgClient.query(\`
+          UPDATE public.reservations
+          SET \${updateFlagCol} = 1, modified_at = CURRENT_TIMESTAMP
+          WHERE \${pkCol} = ANY($1);
+        \`, [successfulResIds]);
+        console.log(\`[INBOUND SYNC] ✅ Ingested \${successfulResIds.length} reservations across 3 tables (Reservations_booklogic, reservations_details_booklogic, reservation_Customer_booklogic) and marked \${updateFlagCol} = 1 in PG\`);
+      } catch (uErr) {
+        console.error('Update flag error:', uErr.message);
+      }
     }
 
-    // 7. Upsert Customer records into dbo.reservation_Customer_booklogic
-    for (const c of custResult.rows) {
-      const req = sqlPool.request();
-      req.input('custId', sql.BigInt, c.customer_id);
-      req.input('resId', sql.BigInt, c.res_id);
-      req.input('firstName', sql.NVarChar(100), c.first_name || '');
-      req.input('lastName', sql.NVarChar(100), c.last_name || '');
-      req.input('customerName', sql.NVarChar(200), c.customer_name || \`\${c.first_name || ''} \${c.last_name || ''}\`.trim());
-      req.input('phone', sql.NVarChar(100), c.phone || '');
-      req.input('email', sql.NVarChar(200), c.email || '');
-      req.input('address', sql.NVarChar(sql.MAX), c.address || '');
-      req.input('city', sql.NVarChar(100), c.city || '');
-      req.input('country', sql.NVarChar(100), c.country || 'India');
-      req.input('idProofType', sql.NVarChar(50), c.id_proof_type || 'PASSPORT');
-      req.input('idProofNumber', sql.NVarChar(100), c.id_proof_number || '');
-
-      await req.query(\`
-        IF EXISTS (SELECT 1 FROM dbo.reservation_Customer_booklogic WHERE customer_id = @custId)
-        BEGIN
-          UPDATE dbo.reservation_Customer_booklogic
-          SET res_id = @resId, first_name = @firstName, last_name = @lastName,
-              customer_name = @customerName, phone = @phone, email = @email,
-              address = @address, city = @city, country = @country,
-              id_proof_type = @idProofType, id_proof_number = @idProofNumber, _synced_at = GETDATE()
-          WHERE customer_id = @custId;
-        END
-        ELSE
-        BEGIN
-          INSERT INTO dbo.reservation_Customer_booklogic (
-            customer_id, res_id, first_name, last_name, customer_name,
-            phone, email, address, city, country, id_proof_type, id_proof_number, _synced_at
-          ) VALUES (
-            @custId, @resId, @firstName, @lastName, @customerName,
-            @phone, @email, @address, @city, @country, @idProofType, @idProofNumber, GETDATE()
-          );
-        END
-      \`);
-    }
-
-    // 8. Mark updateflag = 1 in PostgreSQL
-    if (resIds.length > 0) {
-      await pgClient.query(\`
-        UPDATE public.reservations
-        SET updateflag = 1, modified_at = CURRENT_TIMESTAMP
-        WHERE res_id = ANY($1::bigint[]);
-      \`, [resIds]);
-      console.log(\`[INBOUND SYNC] ✅ Ingested \${resIds.length} reservations across 3 tables (Reservations_booklogic, reservations_details_booklogic, reservation_Customer_booklogic) and marked updateflag = 1 in PG\`);
-    }
-
-    return resResult.rows.length;
+    return successfulResIds.length;
   } catch (err) {
     console.error('3-Table reservations inbound sync error:', err.message);
     return 0;
@@ -1124,7 +1262,7 @@ async function startAutoSync() {
   sqlPool = await sql.connect(mssqlConfig);
   console.log('✅ Connected to Local SQL Server.');
 
-  console.log('🚀 Connecting to VPS PostgreSQL (72.61.240.34/BOOKLOGIC)...');
+  console.log('🚀 Connecting to VPS PostgreSQL (${postgresHost}/${postgresDb})...');
   const pgClient = await pgPool.connect();
   console.log('✅ Connected to VPS PostgreSQL.');
   pgClient.release();
