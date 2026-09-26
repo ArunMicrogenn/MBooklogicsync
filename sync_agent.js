@@ -265,6 +265,7 @@ async function loadSqlServerTableMetadata(pool) {
         c.TABLE_NAME, 
         c.COLUMN_NAME, 
         c.DATA_TYPE,
+        c.CHARACTER_MAXIMUM_LENGTH,
         COLUMNPROPERTY(OBJECT_ID(c.TABLE_SCHEMA + '.' + c.TABLE_NAME), c.COLUMN_NAME, 'IsIdentity') AS is_identity
       FROM INFORMATION_SCHEMA.COLUMNS c
       WHERE c.TABLE_NAME IN (
@@ -289,7 +290,8 @@ async function loadSqlServerTableMetadata(pool) {
       const colName = r.COLUMN_NAME;
       const isIdent = r.is_identity === 1;
       const dataType = r.DATA_TYPE.toLowerCase();
-      const info = { name: colName, isIdentity: isIdent, dataType };
+      const maxLen = r.CHARACTER_MAXIMUM_LENGTH !== null && r.CHARACTER_MAXIMUM_LENGTH !== undefined ? Number(r.CHARACTER_MAXIMUM_LENGTH) : null;
+      const info = { name: colName, isIdentity: isIdent, dataType, maxLength: maxLen };
 
       if (tbl.includes('detail') && tbl.includes('perday')) {
         mssqlColumns.perday.set(colName.toLowerCase(), info);
@@ -531,7 +533,7 @@ async function upsertMssqlRecord(tableName, colMap, pkCandidates, data) {
       }
     }
 
-    // Assign appropriate SQL type
+    // Assign appropriate SQL type and truncate strings if length exceeds column size
     let sqlType = sql.NVarChar(sql.MAX);
     if (dataType.includes('bigint')) {
       sqlType = sql.BigInt;
@@ -549,8 +551,24 @@ async function upsertMssqlRecord(tableName, colMap, pkCandidates, data) {
       sqlType = sql.Bit;
       val = val ? 1 : 0;
     } else {
-      sqlType = sql.NVarChar(sql.MAX);
-      val = String(val);
+      // String / VARCHAR / NVARCHAR types
+      if (val instanceof Date) {
+        val = val.toISOString().replace('T', ' ').substring(0, 19);
+      } else {
+        val = String(val);
+      }
+
+      // STRICT AUTO-TRUNCATION: Prevents "String or binary data would be truncated"
+      const maxLen = colInfo.maxLength;
+      if (maxLen && maxLen > 0 && val.length > maxLen) {
+        val = val.substring(0, maxLen);
+      }
+
+      if (maxLen && maxLen > 0 && maxLen <= 4000) {
+        sqlType = sql.NVarChar(maxLen);
+      } else {
+        sqlType = sql.NVarChar(sql.MAX);
+      }
     }
 
     const paramName = `p_${paramIndex++}`;
@@ -704,6 +722,17 @@ async function syncInboundReservations() {
           masterPayload
         );
 
+        // Fetch auto-generated resbkid from dbo.reservations_booklogic for this Res_id
+        let resbkidVal = resId;
+        try {
+          const bkIdRes = await mssqlPool.request()
+            .input('Res_id', sql.BigInt, resId)
+            .query('SELECT resbkid FROM dbo.reservations_booklogic WHERE Res_id = @Res_id');
+          if (bkIdRes.recordset && bkIdRes.recordset.length > 0 && bkIdRes.recordset[0].resbkid !== undefined) {
+            resbkidVal = bkIdRes.recordset[0].resbkid;
+          }
+        } catch (e) {}
+
         // ==============================================================================
         // 2. CHILD TABLE 1: dbo.reservations_details_booklogic
         // ==============================================================================
@@ -730,6 +759,7 @@ async function syncInboundReservations() {
             const detailPayload = {
               detail_id: detailId,
               Res_id: resId,
+              resbkid: resbkidVal,
               Roomtypeid: safeNum(getVal(d, 'roomtypeid', 'room_type_id'), 101),
               Room_Type_Name: (getVal(d, 'room_type_name', 'roomtypename') || 'Standard Deluxe').toString(),
               Rooms_Booked: safeNum(getVal(d, 'rooms_booked', 'roomsbooked', 'qty'), 1),
@@ -758,6 +788,7 @@ async function syncInboundReservations() {
           const detailPayload = {
             detail_id: resId * 1000 + 1,
             Res_id: resId,
+            resbkid: resbkidVal,
             Roomtypeid: 101,
             Room_Type_Name: 'Standard Room',
             Rooms_Booked: 1,
@@ -811,6 +842,7 @@ async function syncInboundReservations() {
             const perDayPayload = {
               perday_id: perdayId,
               Res_id: resId,
+              resbkid: resbkidVal,
               detail_id: safeNum(getVal(p, 'detail_id', 'detailid'), resId * 1000 + 1),
               Rate_Date: safeDate(getVal(p, 'rate_date', 'ratedate', 'date')) || checkInDate,
               Roomtypeid: safeNum(getVal(p, 'roomtypeid', 'room_type_id'), 101),
@@ -833,6 +865,7 @@ async function syncInboundReservations() {
           const perDayPayload = {
             perday_id: resId * 1000 + 1,
             Res_id: resId,
+            resbkid: resbkidVal,
             detail_id: resId * 1000 + 1,
             Rate_Date: checkInDate,
             Roomtypeid: 101,
@@ -881,6 +914,7 @@ async function syncInboundReservations() {
             const custPayload = {
               customer_id: custId,
               Res_id: resId,
+              resbkid: resbkidVal,
               First_Name: fName,
               Last_Name: lName,
               Customer_Name: cName,
@@ -907,6 +941,7 @@ async function syncInboundReservations() {
           const custPayload = {
             customer_id: resId * 1000 + 1,
             Res_id: resId,
+            resbkid: resbkidVal,
             First_Name: 'Guest',
             Last_Name: String(resId),
             Customer_Name: `Guest ${resId}`,
@@ -944,16 +979,17 @@ async function syncInboundReservations() {
           SET "Updateflag" = 1,
               "updateflag" = 1,
               "synced_at" = CURRENT_TIMESTAMP
-          WHERE "Res_id" = ANY($1::int[]) OR res_id = ANY($1::int[])
+          WHERE "Res_id" = ANY($1::bigint[]) OR res_id = ANY($1::bigint[]) OR "Res_id" = ANY($1::int[]) OR res_id = ANY($1::int[])
         `, [committedResIds]);
-        log('diag', `PostgreSQL BOOKLOGIC marked Updateflag = 1 and synced_at for Res_ids: [${committedResIds.join(', ')}]`);
+        log('success', `[INBOUND] 🔄 Successfully marked Updateflag = 1 and synced_at in VPS BOOKLOGIC for Res_ids: [${committedResIds.join(', ')}]`);
       } catch (flagErr) {
         try {
           await pgClient.query(`
             UPDATE ${pgTables.reservations}
             SET updateflag = 1, synced_at = CURRENT_TIMESTAMP
-            WHERE res_id = ANY($1::int[])
+            WHERE res_id = ANY($1::bigint[]) OR res_id = ANY($1::int[])
           `, [committedResIds]);
+          log('success', `[INBOUND] 🔄 Successfully marked updateflag = 1 in VPS BOOKLOGIC for Res_ids: [${committedResIds.join(', ')}]`);
         } catch (fErr2) {
           log('warn', `Notice setting updateflag in PG BOOKLOGIC: ${fErr2.message}`);
         }
@@ -988,47 +1024,80 @@ async function syncOutboundRoomAvailability() {
     const syncedAvaids = [];
 
     for (const row of result.recordset) {
-      if (!row.avaidd) continue;
+      const avaidd = safeNum(getVal(row, 'avaidd', 'ava_id', 'id'), 0);
+      if (!avaidd) continue;
 
-      await pgClient.query(`
-        INSERT INTO ${pgTables.availability} (
-          avaidd, roomtypeid, fromdate, todate, availablerooms,
-          uploadflg, notupload, remarks, fromtime, totime,
-          allotcode, hotelcode, irm_update, stopsales, last_synced_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, CURRENT_TIMESTAMP)
-        ON CONFLICT (avaidd) DO UPDATE SET
-          roomtypeid = EXCLUDED.roomtypeid,
-          fromdate = EXCLUDED.fromdate,
-          todate = EXCLUDED.todate,
-          availablerooms = EXCLUDED.availablerooms,
-          uploadflg = 1,
-          notupload = EXCLUDED.notupload,
-          remarks = EXCLUDED.remarks,
-          fromtime = EXCLUDED.fromtime,
-          totime = EXCLUDED.totime,
-          allotcode = EXCLUDED.allotcode,
-          hotelcode = EXCLUDED.hotelcode,
-          irm_update = EXCLUDED.irm_update,
-          stopsales = EXCLUDED.stopsales,
-          last_synced_at = CURRENT_TIMESTAMP;
+      const roomtypeid = safeNum(getVal(row, 'roomtypeid', 'room_type_id', 'room_id'), 0);
+      const fromdate = safeDate(getVal(row, 'fromdate', 'from_date', 'start_date'));
+      const todate = safeDate(getVal(row, 'todate', 'to_date', 'end_date'));
+      const availablerooms = safeNum(getVal(row, 'availablerooms', 'available_rooms', 'rooms'), 0);
+      const notupload = safeNum(getVal(row, 'notupload', 'not_upload'), 0);
+      const remarks = getVal(row, 'remarks', 'remark') ? String(getVal(row, 'remarks', 'remark')) : '';
+      const fromtime = safeDate(getVal(row, 'fromtime', 'from_time'));
+      const totime = safeDate(getVal(row, 'totime', 'to_time'));
+      const allotcode = getVal(row, 'allotcode', 'allot_code') ? String(getVal(row, 'allotcode', 'allot_code')) : '';
+      const hotelcode = getVal(row, 'hotelcode', 'hotel_code') ? String(getVal(row, 'hotelcode', 'hotel_code')) : 'IZM2366';
+      const irm_update = safeNum(getVal(row, 'irm_update', 'irmupdate'), 0);
+      const stopsales = safeNum(getVal(row, 'stopsales', 'stop_sales'), 0);
+
+      // Try update existing record matching roomtypeid, fromdate, todate, hotelcode
+      const updateRes = await pgClient.query(`
+        UPDATE ${pgTables.availability}
+        SET availablerooms = $1::int,
+            uploadflg = 1,
+            notupload = $2::int,
+            remarks = $3::text,
+            fromtime = $4::timestamp,
+            totime = $5::timestamp,
+            allotcode = $6::text,
+            irm_update = $7::int,
+            stopsales = $8::int,
+            last_synced_at = CURRENT_TIMESTAMP
+        WHERE roomtypeid = $9::bigint
+          AND fromdate = $10::timestamp
+          AND todate = $11::timestamp
+          AND hotelcode = $12::text
       `, [
-        row.avaidd,
-        row.Roomtypeid || row.roomtypeid || null,
-        safeDate(row.fromdate),
-        safeDate(row.todate),
-        safeNum(row.Availablerooms !== undefined ? row.Availablerooms : row.availablerooms, 0),
-        1,
-        row.notupload ? String(row.notupload) : null,
-        row.Remarks || row.remarks || '',
-        safeDate(row.Fromtime || row.fromtime),
-        safeDate(row.Totime || row.totime),
-        (row.allotcode || '').toString(),
-        (row.hotelcode || '').toString(),
-        safeNum(row.IRM_Update !== undefined ? row.IRM_Update : row.irm_update, 0),
-        safeNum(row.stopsales !== undefined ? row.stopsales : 0, 0),
+        availablerooms,
+        notupload,
+        remarks,
+        fromtime,
+        totime,
+        allotcode,
+        irm_update,
+        stopsales,
+        roomtypeid || null,
+        fromdate,
+        todate,
+        hotelcode
       ]);
 
-      syncedAvaids.push(row.avaidd);
+      if (updateRes.rowCount === 0) {
+        // Insert new record without specifying avaidd (auto-generated by PostgreSQL identity/serial)
+        await pgClient.query(`
+          INSERT INTO ${pgTables.availability} (
+            roomtypeid, fromdate, todate, availablerooms,
+            uploadflg, notupload, remarks, fromtime, totime,
+            allotcode, hotelcode, irm_update, stopsales, last_synced_at
+          ) VALUES ($1::bigint, $2::timestamp, $3::timestamp, $4::int, $5::int, $6::int, $7::text, $8::timestamp, $9::timestamp, $10::text, $11::text, $12::int, $13::int, CURRENT_TIMESTAMP)
+        `, [
+          roomtypeid || null,
+          fromdate,
+          todate,
+          availablerooms,
+          1,
+          notupload,
+          remarks,
+          fromtime,
+          totime,
+          allotcode,
+          hotelcode,
+          irm_update,
+          stopsales
+        ]);
+      }
+
+      syncedAvaids.push(avaidd);
     }
 
     if (syncedAvaids.length > 0) {
@@ -1077,15 +1146,27 @@ async function syncOutboundRoomRates() {
     const syncedRateIds = [];
 
     for (const row of result.recordset) {
-      const rId = row.rateid || row.Rateid || row.id;
-      if (!rId) continue;
+      const rateid = safeNum(getVal(row, 'rateid', 'rate_id', 'id'), 0);
+      if (!rateid) continue;
+
+      const roomtypeid = safeNum(getVal(row, 'roomtypeid', 'room_type_id'), 0);
+      const fromdate = safeDate(getVal(row, 'fromdate', 'from_date'));
+      const todate = safeDate(getVal(row, 'todate', 'to_date'));
+      const singlerate = safeNum(getVal(row, 'singlerate', 'single_rate'), 0);
+      const doublerate = safeNum(getVal(row, 'doublerate', 'double_rate'), 0);
+      const triplerate = safeNum(getVal(row, 'triplerate', 'triple_rate'), 0);
+      const quadrate = safeNum(getVal(row, 'quadrate', 'quad_rate'), 0);
+      const extrabed = safeNum(getVal(row, 'extrabed', 'extra_bed'), 0);
+      const childrate = safeNum(getVal(row, 'childrate', 'child_rate'), 0);
+      const hotelcode = getVal(row, 'hotelcode', 'hotel_code') ? String(getVal(row, 'hotelcode', 'hotel_code')) : 'IZM2366';
+      const rateplancode = getVal(row, 'rateplancode', 'rate_plan_code', 'rateplan') ? String(getVal(row, 'rateplancode', 'rate_plan_code', 'rateplan')) : 'BAR';
 
       await pgClient.query(`
         INSERT INTO ${pgTables.rateupdates} (
           rateid, roomtypeid, fromdate, todate,
           singlerate, doublerate, triplerate, quadrate, extrabed, childrate,
           hotelcode, rateplancode, uploadflg, last_synced_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, CURRENT_TIMESTAMP)
+        ) VALUES ($1::bigint, $2::bigint, $3::timestamp, $4::timestamp, $5::decimal, $6::decimal, $7::decimal, $8::decimal, $9::decimal, $10::decimal, $11::text, $12::text, $13::int, CURRENT_TIMESTAMP)
         ON CONFLICT (rateid) DO UPDATE SET
           roomtypeid = EXCLUDED.roomtypeid,
           fromdate = EXCLUDED.fromdate,
@@ -1101,22 +1182,22 @@ async function syncOutboundRoomRates() {
           uploadflg = 1,
           last_synced_at = CURRENT_TIMESTAMP;
       `, [
-        rId,
-        row.Roomtypeid || row.roomtypeid || null,
-        safeDate(row.fromdate),
-        safeDate(row.todate),
-        safeNum(row.singlerate, 0),
-        safeNum(row.doublerate, 0),
-        safeNum(row.triplerate, 0),
-        safeNum(row.quadrate, 0),
-        safeNum(row.extrabed, 0),
-        safeNum(row.childrate, 0),
-        (row.hotelcode || '').toString(),
-        (row.rateplancode || '').toString(),
-        1,
+        rateid,
+        roomtypeid || null,
+        fromdate,
+        todate,
+        singlerate,
+        doublerate,
+        triplerate,
+        quadrate,
+        extrabed,
+        childrate,
+        hotelcode,
+        rateplancode,
+        1
       ]);
 
-      syncedRateIds.push(rId);
+      syncedRateIds.push(rateid);
     }
 
     if (syncedRateIds.length > 0) {
