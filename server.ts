@@ -2738,6 +2738,41 @@ CREATE INDEX IF NOT EXISTS idx_roomavail_dates ON public.trans_roomavailability_
     });
   });
 
+  // API: Repush specific reservation from VPS to SQL Server by resetting Updateflag = 0
+  app.post('/api/vps/repush-booking', async (req, res) => {
+    const { bookingId = 'MC-25-0189092127', resId = 12 } = req.body;
+    let client: pg.Client | null = null;
+    try {
+      client = new Client({
+        host: state.postgres.host || '72.61.240.34',
+        port: state.postgres.port || 5432,
+        user: state.postgres.user || 'postgres',
+        password: process.env.POSTGRES_PASSWORD || 'mgenn',
+        database: 'BOOKLOGIC',
+        ssl: false,
+        connectionTimeoutMillis: 5000,
+      });
+      await client.connect();
+
+      const result = await client.query(`
+        UPDATE "Reservations"
+        SET "Updateflag" = 0, "synced_at" = NULL
+        WHERE "Res_id" = $1 OR "Booking_Id" ILIKE $2
+      `, [resId || 12, `%${bookingId}%`]);
+
+      res.json({
+        success: true,
+        message: `Successfully reset Updateflag = 0 on VPS PostgreSQL BOOKLOGIC for Booking ${bookingId} (Res_id: ${resId})`,
+        rowCount: result.rowCount,
+      });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      res.status(500).json({ success: false, error: msg });
+    } finally {
+      if (client) await client.end().catch(() => {});
+    }
+  });
+
   // API: Add Test Relational Reservation on VPS PostgreSQL with updateflag = 0
   app.post('/api/sync-unit/create-reservation-pg', async (req, res) => {
     const {
@@ -2989,10 +3024,102 @@ CREATE INDEX IF NOT EXISTS idx_roomavail_dates ON public.trans_roomavailability_
     }
   };
 
+  const sendInstallService = (req: express.Request, res: express.Response) => {
+    try {
+      const filePath = path.join(process.cwd(), 'install_service.js');
+      if (fs.existsSync(filePath)) {
+        const content = fs.readFileSync(filePath, 'utf8');
+        res.setHeader('Content-Disposition', 'attachment; filename="install_service.js"');
+        res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+        res.type('text/javascript').send(content);
+      } else {
+        res.status(404).send('// install_service.js not found');
+      }
+    } catch (err: unknown) {
+      res.status(500).send(`// Error reading install_service.js: ${err}`);
+    }
+  };
+
+  const sendInstallBat = (req: express.Request, res: express.Response) => {
+    try {
+      const filePath = path.join(process.cwd(), 'install_service.bat');
+      if (fs.existsSync(filePath)) {
+        const content = fs.readFileSync(filePath, 'utf8');
+        res.setHeader('Content-Disposition', 'attachment; filename="install_service.bat"');
+        res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+        res.type('text/plain').send(content);
+      } else {
+        res.status(404).send('@rem install_service.bat not found');
+      }
+    } catch (err: unknown) {
+      res.status(500).send(`@rem Error reading install_service.bat: ${err}`);
+    }
+  };
+
+  const sendTestMssql = (req: express.Request, res: express.Response) => {
+    try {
+      const filePath = path.join(process.cwd(), 'test_mssql.js');
+      if (fs.existsSync(filePath)) {
+        const content = fs.readFileSync(filePath, 'utf8');
+        res.setHeader('Content-Disposition', 'attachment; filename="test_mssql.js"');
+        res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+        res.type('text/javascript').send(content);
+      } else {
+        res.status(404).send('// test_mssql.js not found');
+      }
+    } catch (err: unknown) {
+      res.status(500).send(`// Error reading test_mssql.js: ${err}`);
+    }
+  };
+
+  const sendEnableSqlTcpBat = (req: express.Request, res: express.Response) => {
+    try {
+      const filePath = path.join(process.cwd(), 'enable_sql_tcp.bat');
+      if (fs.existsSync(filePath)) {
+        const content = fs.readFileSync(filePath, 'utf8');
+        res.setHeader('Content-Disposition', 'attachment; filename="enable_sql_tcp.bat"');
+        res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+        res.type('text/plain').send(content);
+      } else {
+        res.status(404).send('@rem enable_sql_tcp.bat not found');
+      }
+    } catch (err: unknown) {
+      res.status(500).send(`@rem Error reading enable_sql_tcp.bat: ${err}`);
+    }
+  };
+
+  const sendRegisterWindowsServiceBat = (req: express.Request, res: express.Response) => {
+    try {
+      const filePath = path.join(process.cwd(), 'register_windows_service.bat');
+      if (fs.existsSync(filePath)) {
+        const content = fs.readFileSync(filePath, 'utf8');
+        res.setHeader('Content-Disposition', 'attachment; filename="register_windows_service.bat"');
+        res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+        res.type('text/plain').send(content);
+      } else {
+        res.status(404).send('@rem register_windows_service.bat not found');
+      }
+    } catch (err: unknown) {
+      res.status(500).send(`@rem Error reading register_windows_service.bat: ${err}`);
+    }
+  };
+
   app.get('/api/sync_agent.js', sendSyncAgent);
   app.get('/api/sync-agent.js', sendSyncAgent);
   app.get('/sync_agent.js', sendSyncAgent);
   app.get('/sync-agent.js', sendSyncAgent);
+  app.get('/test_mssql.js', sendTestMssql);
+  app.get('/api/test_mssql.js', sendTestMssql);
+  app.get('/api/download-test-mssql', sendTestMssql);
+  app.get('/enable_sql_tcp.bat', sendEnableSqlTcpBat);
+  app.get('/api/enable_sql_tcp.bat', sendEnableSqlTcpBat);
+  app.get('/api/download-enable-sql-tcp', sendEnableSqlTcpBat);
+  app.get('/register_windows_service.bat', sendRegisterWindowsServiceBat);
+  app.get('/api/register_windows_service.bat', sendRegisterWindowsServiceBat);
+  app.get('/install_service.js', sendInstallService);
+  app.get('/api/install_service.js', sendInstallService);
+  app.get('/install_service.bat', sendInstallBat);
+  app.get('/api/install_service.bat', sendInstallBat);
 
   app.get('/api/sync-agent-code', (req, res) => {
     try {

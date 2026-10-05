@@ -1,5 +1,5 @@
 import React from 'react';
-import { Play, Pause, Square, RefreshCw, Zap, Server, Settings, Terminal, Database } from 'lucide-react';
+import { Play, Pause, Square, RefreshCw, Zap, Server, Settings, Terminal, Database, Download } from 'lucide-react';
 import { SyncStatus } from '../types';
 
 interface HeaderProps {
@@ -150,6 +150,35 @@ export const Header: React.FC<HeaderProps> = ({
           >
             <Terminal className="w-3.5 h-3.5 text-zinc-500" />
             Daemon Scripts
+          </button>
+
+          {/* Download Agent Button */}
+          <button
+            id="btn-download-agent"
+            onClick={async () => {
+              try {
+                const res = await fetch('/api/sync-agent-code');
+                const data = await res.json();
+                if (data.success && data.code) {
+                  const blob = new Blob([data.code], { type: 'text/javascript;charset=utf-8' });
+                  const url = URL.createObjectURL(blob);
+                  const a = document.createElement('a');
+                  a.href = url;
+                  a.download = 'sync_agent.js';
+                  document.body.appendChild(a);
+                  a.click();
+                  document.body.removeChild(a);
+                  URL.revokeObjectURL(url);
+                }
+              } catch {
+                window.open('/api/sync_agent.js', '_blank');
+              }
+            }}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold text-emerald-800 bg-emerald-100 hover:bg-emerald-200 active:bg-emerald-300 border border-emerald-300 transition shadow-2xs"
+            title="Download latest sync_agent.js to your local computer"
+          >
+            <Download className="w-3.5 h-3.5 text-emerald-700" />
+            Download sync_agent.js
           </button>
 
           {/* VPS Target DB Button */}

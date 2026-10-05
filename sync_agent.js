@@ -24,26 +24,68 @@ const { Pool, Client } = require('pg');
 // --------------------------------------------------------------------------------------
 // CONFIGURATION & PARSING
 // --------------------------------------------------------------------------------------
+function parseCliArgs() {
+  const args = process.argv.slice(2);
+  const parsed = {};
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (arg.startsWith('--hotelcode=') || arg.startsWith('--hotel=') || arg.startsWith('--hotel_code=')) {
+      parsed.hotelCode = arg.split('=')[1];
+    } else if (arg === '--hotelcode' || arg === '--hotel' || arg === '-h') {
+      parsed.hotelCode = args[i + 1];
+    } else if (arg.startsWith('--database=') || arg.startsWith('--db=')) {
+      parsed.database = arg.split('=')[1];
+    } else if (arg === '--database' || arg === '--db' || arg === '-d') {
+      parsed.database = args[i + 1];
+    } else if (arg.startsWith('--server=') || arg.startsWith('--host=')) {
+      parsed.server = arg.split('=')[1];
+    } else if (arg === '--server' || arg === '--host' || arg === '-s') {
+      parsed.server = args[i + 1];
+    } else if (arg.startsWith('--user=') || arg.startsWith('--username=')) {
+      parsed.user = arg.split('=')[1];
+    } else if (arg === '--user' || arg === '-u') {
+      parsed.user = args[i + 1];
+    } else if (arg.startsWith('--password=') || arg.startsWith('--pass=')) {
+      parsed.password = arg.split('=')[1];
+    } else if (arg === '--password' || arg === '-p') {
+      parsed.password = args[i + 1];
+    } else if (arg.startsWith('--port=') || arg.startsWith('-P=')) {
+      parsed.port = arg.split('=')[1];
+    } else if (arg === '--port' || arg === '-P') {
+      parsed.port = args[i + 1];
+    } else if (arg.startsWith('--repush=') || arg.startsWith('--res_id=') || arg.startsWith('--booking_id=')) {
+      parsed.repush = arg.split('=')[1];
+    } else if (arg === '--repush' || arg === '--res_id' || arg === '-r') {
+      parsed.repush = args[i + 1] || 'all';
+    }
+  }
+  return parsed;
+}
+
+const cliArgs = parseCliArgs();
+let CONFIGURED_HOTEL_CODE = (cliArgs.hotelCode || process.env.HOTEL_CODE || process.env.HOTELCODE || process.env.HOTEL_ID || '').trim();
+let REPUSH_BOOKING_TARGET = (cliArgs.repush || '').trim();
+let cachedDiscoveredHotelCodes = null;
+
 function parseSqlServerServer(rawServer, rawPort) {
-  let serverStr = (rawServer || 'DESKTOP-VDGDM3P').trim();
+  let serverStr = (rawServer || process.env.MSSQL_SERVER || 'NEWSERVER\\SQLEXPRESS').trim();
   let instanceName = undefined;
-  let port = rawPort ? parseInt(rawPort, 10) : 1433;
+  let port = rawPort ? parseInt(rawPort, 10) : undefined;
 
   if (serverStr.includes('\\')) {
     const parts = serverStr.split('\\');
-    serverStr = parts[0] || 'DESKTOP-VDGDM3P';
-    instanceName = parts[1];
-    port = rawPort ? parseInt(rawPort, 10) : undefined;
+    serverStr = parts[0] || 'NEWSERVER';
+    instanceName = parts[1] || 'SQLEXPRESS';
   }
   return { server: serverStr, instanceName, port };
 }
 
-const MSSQL_USER = process.env.MSSQL_USER || 'sa';
-const MSSQL_PASSWORD = process.env.MSSQL_PASSWORD || 'mgenn@123';
-const MSSQL_SERVER_INPUT = process.env.MSSQL_SERVER || process.env.MSSQL_HOST || 'DESKTOP-VDGDM3P';
-const MSSQL_DATABASE_INPUT = process.env.MSSQL_DATABASE || 'varanashiinn';
+const MSSQL_USER = cliArgs.user || process.env.MSSQL_USER || 'sa';
+const MSSQL_PASSWORD = cliArgs.password || process.env.MSSQL_PASSWORD || 'mgenn@123';
+const MSSQL_SERVER_INPUT = cliArgs.server || process.env.MSSQL_SERVER || process.env.MSSQL_HOST || 'NEWSERVER\\SQLEXPRESS';
+const MSSQL_DATABASE_INPUT = cliArgs.database || process.env.MSSQL_DATABASE || 'gowtham';
 
-const parsedMssql = parseSqlServerServer(MSSQL_SERVER_INPUT, process.env.MSSQL_PORT);
+const parsedMssql = parseSqlServerServer(MSSQL_SERVER_INPUT, cliArgs.port || process.env.MSSQL_PORT);
 
 const PG_HOST = process.env.PG_HOST || process.env.POSTGRES_HOST || '72.61.240.34';
 const PG_PORT = parseInt(process.env.PG_PORT || process.env.POSTGRES_PORT || '5432', 10);
@@ -55,6 +97,10 @@ const SYNC_INTERVAL_MS = parseInt(process.env.SYNC_INTERVAL_MS || '3000', 10);
 
 let mssqlPool = null;
 let pgPool = null;
+
+let pgReservationHotelCol = '"Hotel_Code"';
+let pgReservationUpdateFlagCol = '"Updateflag"';
+let pgReservationIdCol = '"Res_id"';
 
 // Discovered remote table identifiers in PostgreSQL BOOKLOGIC database
 let pgTables = {
@@ -100,6 +146,26 @@ function log(level, message, data = '') {
 function safeDate(val) {
   if (!val) return null;
   if (val instanceof Date) return isNaN(val.getTime()) ? null : val;
+  if (typeof val === 'string') {
+    const s = val.trim();
+    if (!s) return null;
+    // Check for DD/MM/YYYY or DD-MM-YYYY
+    const ddmmyyyy = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})(.*)$/);
+    if (ddmmyyyy) {
+      const day = parseInt(ddmmyyyy[1], 10);
+      const month = parseInt(ddmmyyyy[2], 10) - 1;
+      const year = parseInt(ddmmyyyy[3], 10);
+      const rest = (ddmmyyyy[4] || '').trim();
+      if (rest) {
+        const timeParts = rest.split(':');
+        const hour = parseInt(timeParts[0] || '0', 10);
+        const min = parseInt(timeParts[1] || '0', 10);
+        const sec = parseInt(timeParts[2] || '0', 10);
+        return new Date(Date.UTC(year, month, day, hour, min, sec));
+      }
+      return new Date(Date.UTC(year, month, day, 0, 0, 0));
+    }
+  }
   const d = new Date(val);
   return isNaN(d.getTime()) ? null : d;
 }
@@ -124,29 +190,256 @@ function getVal(row, ...keys) {
   return null;
 }
 
+const os = require('os');
+const net = require('net');
+
+function probePort(host, port, timeoutMs = 300) {
+  return new Promise(resolve => {
+    const socket = new net.Socket();
+    let settled = false;
+    socket.setTimeout(timeoutMs);
+    socket.on('connect', () => {
+      if (!settled) {
+        settled = true;
+        socket.destroy();
+        resolve(true);
+      }
+    });
+    socket.on('timeout', () => {
+      if (!settled) {
+        settled = true;
+        socket.destroy();
+        resolve(false);
+      }
+    });
+    socket.on('error', () => {
+      if (!settled) {
+        settled = true;
+        socket.destroy();
+        resolve(false);
+      }
+    });
+    try {
+      socket.connect(port, host);
+    } catch (e) {
+      resolve(false);
+    }
+  });
+}
+
 // --------------------------------------------------------------------------------------
 // LOCAL SQL SERVER INITIALIZATION & COLUMN DISCOVERY
 // --------------------------------------------------------------------------------------
 async function connectToSqlServer() {
-  const cfg = {
-    user: MSSQL_USER,
-    password: MSSQL_PASSWORD,
-    server: parsedMssql.server,
-    database: MSSQL_DATABASE_INPUT,
-    options: {
-      instanceName: parsedMssql.instanceName,
-      encrypt: false,
-      trustServerCertificate: true,
-      enableArithAbort: true,
-      connectTimeout: 8000,
-      requestTimeout: 25000,
-    },
-  };
-  if (parsedMssql.port && !parsedMssql.instanceName) cfg.port = parsedMssql.port;
+  const attempts = [];
+  const localHostName = os.hostname();
+  const instName = parsedMssql.instanceName || 'SQLEXPRESS';
 
-  log('info', `Connecting to Local SQL Server (${parsedMssql.server} / Database: ${MSSQL_DATABASE_INPUT})...`);
-  const pool = await sql.connect(cfg);
-  log('success', `Connected to Local SQL Server: ${parsedMssql.server} (Database: ${MSSQL_DATABASE_INPUT}).`);
+  // Attempt 1: Direct configured server & instance
+  attempts.push({
+    label: parsedMssql.instanceName ? `'${parsedMssql.server}\\${parsedMssql.instanceName}'` : `'${parsedMssql.server}' (port: ${parsedMssql.port || 1433})`,
+    cfg: {
+      user: MSSQL_USER,
+      password: MSSQL_PASSWORD,
+      server: parsedMssql.server,
+      database: MSSQL_DATABASE_INPUT,
+      port: parsedMssql.port,
+      options: {
+        instanceName: parsedMssql.instanceName,
+        encrypt: false,
+        trustServerCertificate: true,
+        enableArithAbort: true,
+        connectTimeout: 4000,
+        requestTimeout: 25000,
+      },
+    }
+  });
+
+  // Attempt 2: Local hostname dynamically detected (e.g. ADMIN-PC\SQLEXPRESS)
+  if (localHostName && localHostName.toLowerCase() !== parsedMssql.server.toLowerCase()) {
+    attempts.push({
+      label: `'${localHostName}\\${instName}'`,
+      cfg: {
+        user: MSSQL_USER,
+        password: MSSQL_PASSWORD,
+        server: localHostName,
+        database: MSSQL_DATABASE_INPUT,
+        options: {
+          instanceName: instName,
+          encrypt: false,
+          trustServerCertificate: true,
+          enableArithAbort: true,
+          connectTimeout: 4000,
+          requestTimeout: 25000,
+        },
+      }
+    });
+  }
+
+  // Attempt 3: localhost\SQLEXPRESS & 127.0.0.1\SQLEXPRESS
+  attempts.push({
+    label: `'localhost\\${instName}'`,
+    cfg: {
+      user: MSSQL_USER,
+      password: MSSQL_PASSWORD,
+      server: 'localhost',
+      database: MSSQL_DATABASE_INPUT,
+      options: {
+        instanceName: instName,
+        encrypt: false,
+        trustServerCertificate: true,
+        enableArithAbort: true,
+        connectTimeout: 4000,
+        requestTimeout: 25000,
+      },
+    }
+  });
+
+  attempts.push({
+    label: `'127.0.0.1\\${instName}'`,
+    cfg: {
+      user: MSSQL_USER,
+      password: MSSQL_PASSWORD,
+      server: '127.0.0.1',
+      database: MSSQL_DATABASE_INPUT,
+      options: {
+        instanceName: instName,
+        encrypt: false,
+        trustServerCertificate: true,
+        enableArithAbort: true,
+        connectTimeout: 4000,
+        requestTimeout: 25000,
+      },
+    }
+  });
+
+  // Attempt 4: Standard Port 1433 fallback (127.0.0.1, localhost, localHostName)
+  attempts.push({
+    label: `'127.0.0.1' on standard port 1433`,
+    cfg: {
+      user: MSSQL_USER,
+      password: MSSQL_PASSWORD,
+      server: '127.0.0.1',
+      database: MSSQL_DATABASE_INPUT,
+      port: 1433,
+      options: {
+        encrypt: false,
+        trustServerCertificate: true,
+        enableArithAbort: true,
+        connectTimeout: 4000,
+        requestTimeout: 25000,
+      },
+    }
+  });
+
+  attempts.push({
+    label: `'localhost' on standard port 1433`,
+    cfg: {
+      user: MSSQL_USER,
+      password: MSSQL_PASSWORD,
+      server: 'localhost',
+      database: MSSQL_DATABASE_INPUT,
+      port: 1433,
+      options: {
+        encrypt: false,
+        trustServerCertificate: true,
+        enableArithAbort: true,
+        connectTimeout: 4000,
+        requestTimeout: 25000,
+      },
+    }
+  });
+
+  if (parsedMssql.server.toLowerCase() !== '127.0.0.1' && parsedMssql.server.toLowerCase() !== 'localhost') {
+    attempts.push({
+      label: `'${parsedMssql.server}' on port 1433`,
+      cfg: {
+        user: MSSQL_USER,
+        password: MSSQL_PASSWORD,
+        server: parsedMssql.server,
+        database: MSSQL_DATABASE_INPUT,
+        port: 1433,
+        options: {
+          encrypt: false,
+          trustServerCertificate: true,
+          enableArithAbort: true,
+          connectTimeout: 4000,
+          requestTimeout: 25000,
+        },
+      }
+    });
+  }
+
+  let pool = null;
+  let lastErr = null;
+
+  for (const attempt of attempts) {
+    try {
+      log('info', `Connecting to SQL Server via ${attempt.label} (Database: ${MSSQL_DATABASE_INPUT})...`);
+      pool = await sql.connect(attempt.cfg);
+      log('success', `✅ Connected successfully to SQL Server via ${attempt.label}!`);
+      break;
+    } catch (err) {
+      lastErr = err;
+      log('warn', `Could not connect via ${attempt.label}: ${err.message}`);
+    }
+  }
+
+  // Attempt 5: Auto-probe listening ports if SQL Server Express dynamic port is active
+  if (!pool) {
+    log('info', `Scanning active local ports for SQL Server dynamic instance...`);
+    const candidatePorts = [1433, 1434, 14333, 49152, 49153, 49154, 49155, 49156, 49157, 49158, 49159, 49160, 49161, 49162, 49163, 49164, 49165, 50000, 50001, 51234, 52345, 53456, 54321, 55555];
+    const openPorts = [];
+
+    for (const p of candidatePorts) {
+      const isOpen = await probePort('127.0.0.1', p, 150);
+      if (isOpen) openPorts.push(p);
+    }
+
+    if (openPorts.length > 0) {
+      log('info', `Discovered open local ports: [${openPorts.join(', ')}]. Testing SQL Server handshake...`);
+      for (const p of openPorts) {
+        try {
+          const cfg = {
+            user: MSSQL_USER,
+            password: MSSQL_PASSWORD,
+            server: '127.0.0.1',
+            database: MSSQL_DATABASE_INPUT,
+            port: p,
+            options: {
+              encrypt: false,
+              trustServerCertificate: true,
+              enableArithAbort: true,
+              connectTimeout: 3000,
+              requestTimeout: 25000,
+            },
+          };
+          pool = await sql.connect(cfg);
+          log('success', `✅ Connected successfully to SQL Server on discovered port ${p}!`);
+          break;
+        } catch (portErr) {
+          log('warn', `Port ${p} responded but SQL login failed: ${portErr.message}`);
+        }
+      }
+    }
+  }
+
+  if (!pool) {
+    log('error', `❌ All connection attempts to SQL Server [${MSSQL_SERVER_INPUT}] failed.`);
+    log('diag', `Troubleshooting checklist for "${MSSQL_SERVER_INPUT}":`);
+    log('diag', `1. Start SQL Server Browser Service:`);
+    log('diag', `   - Press Win+R -> services.msc -> find "SQL Server Browser" -> Start it & set Startup Type to Automatic.`);
+    log('diag', `2. Enable TCP/IP in SQL Server:`);
+    log('diag', `   - Open "SQL Server Configuration Manager"`);
+    log('diag', `   - Go to "SQL Server Network Configuration" -> "Protocols for SQLEXPRESS"`);
+    log('diag', `   - Right-click "TCP/IP" -> Select "Enable"`);
+    log('diag', `   - Double-click "TCP/IP" -> Go to "IP Addresses" tab -> Scroll to bottom "IPAll" -> Set "TCP Port" to 1433 and clear "TCP Dynamic Ports"`);
+    log('diag', `   - Go to "SQL Server Services" -> Right-click "SQL Server (SQLEXPRESS)" -> Restart.`);
+    log('diag', `3. Verify SQL Server Auth:`);
+    log('diag', `   - Make sure SQL Server is in "SQL Server and Windows Authentication mode" in SSMS Properties -> Security.`);
+    log('diag', `   - Verify user '${MSSQL_USER}' password.`);
+    throw lastErr;
+  }
 
   // Ensure local child tables and outbound tables exist if missing
   try {
@@ -420,6 +713,31 @@ async function connectToPostgresBooklogic() {
     log('info', ` - Room Availability   : ${pgTables.availability}`);
     log('info', ` - Room Rate Updates   : ${pgTables.rateupdates}`);
 
+    // Discover column names in Master Reservations table
+    try {
+      const cleanTblName = pgTables.reservations.replace(/"/g, '').replace('public.', '');
+      const rawCols = await client.query(`
+        SELECT column_name
+        FROM information_schema.columns 
+        WHERE table_schema = 'public' 
+          AND table_name = $1
+      `, [cleanTblName]);
+      const colNames = rawCols.rows.map(r => r.column_name);
+
+      const hotelCol = colNames.find(c => c.toLowerCase().replace(/[^a-z0-9]/g, '') === 'hotelcode');
+      if (hotelCol) pgReservationHotelCol = `"${hotelCol}"`;
+
+      const flagCol = colNames.find(c => c.toLowerCase().replace(/[^a-z0-9]/g, '') === 'updateflag');
+      if (flagCol) pgReservationUpdateFlagCol = `"${flagCol}"`;
+
+      const idCol = colNames.find(c => c.toLowerCase().replace(/[^a-z0-9]/g, '') === 'resid' || c.toLowerCase() === 'id');
+      if (idCol) pgReservationIdCol = `"${idCol}"`;
+
+      log('info', `Target Master Reservation Schema: ID=${pgReservationIdCol}, Hotel=${pgReservationHotelCol}, UpdateFlag=${pgReservationUpdateFlagCol}`);
+    } catch (e) {
+      log('warn', `Column introspection note: ${e.message}`);
+    }
+
     // Ensure outbound tables exist in PostgreSQL
     await client.query(`
       CREATE TABLE IF NOT EXISTS public.trans_roomavailability_chart_datewise (
@@ -605,6 +923,105 @@ async function upsertMssqlRecord(tableName, colMap, pkCandidates, data) {
 }
 
 // --------------------------------------------------------------------------------------
+// HOTEL CODE DISCOVERY & FILTERING
+// --------------------------------------------------------------------------------------
+async function getActiveHotelCodes() {
+  if (CONFIGURED_HOTEL_CODE && CONFIGURED_HOTEL_CODE.toUpperCase() !== 'ALL' && CONFIGURED_HOTEL_CODE !== '*') {
+    return CONFIGURED_HOTEL_CODE.split(',').map(s => s.trim().toUpperCase()).filter(Boolean);
+  }
+
+  if (cachedDiscoveredHotelCodes !== null) {
+    return cachedDiscoveredHotelCodes;
+  }
+
+  const detected = new Set();
+
+  // 1. PRIMARY: Query booklogichotelcode from dbo.mas_hotel in Local SQL Server
+  try {
+    const res = await mssqlPool.request().query(`
+      SELECT booklogichotelcode 
+      FROM dbo.mas_hotel 
+      WHERE booklogichotelcode IS NOT NULL 
+        AND LTRIM(RTRIM(CAST(booklogichotelcode AS VARCHAR(100)))) <> ''
+    `);
+    if (res.recordset && res.recordset.length > 0) {
+      for (const row of res.recordset) {
+        const val = getVal(row, 'booklogichotelcode', 'booklogic_hotelcode', 'booklogic_hotel_code', 'hotelcode');
+        if (val) detected.add(String(val).trim().toUpperCase());
+      }
+      if (detected.size > 0) {
+        log('info', `[HOTEL CONFIG] Discovered booklogichotelcode from dbo.mas_hotel: [${Array.from(detected).join(', ')}]`);
+      }
+    }
+  } catch (e) {
+    // If column name has slight variation or dynamic discovery in dbo.mas_hotel
+    try {
+      const res2 = await mssqlPool.request().query(`SELECT TOP 5 * FROM dbo.mas_hotel`);
+      if (res2.recordset && res2.recordset.length > 0) {
+        for (const row of res2.recordset) {
+          const val = getVal(row, 'booklogichotelcode', 'booklogic_hotelcode', 'booklogic_hotel_code', 'hotelcode', 'hotel_code');
+          if (val) detected.add(String(val).trim().toUpperCase());
+        }
+        if (detected.size > 0) {
+          log('info', `[HOTEL CONFIG] Discovered hotel code from dbo.mas_hotel: [${Array.from(detected).join(', ')}]`);
+        }
+      }
+    } catch (e2) {}
+  }
+
+  // 2. Fallback: Try checking trans_roomavailability_chart_datewise
+  if (detected.size === 0) {
+    try {
+      const res = await mssqlPool.request().query(`
+        SELECT DISTINCT TOP 10 hotelcode 
+        FROM dbo.trans_roomavailability_chart_datewise 
+        WHERE hotelcode IS NOT NULL AND LTRIM(RTRIM(hotelcode)) <> ''
+      `);
+      if (res.recordset) {
+        for (const row of res.recordset) {
+          if (row.hotelcode) detected.add(row.hotelcode.trim().toUpperCase());
+        }
+      }
+    } catch (e) {}
+  }
+
+  // 3. Fallback: Try checking trans_roomrateupdates_datewise
+  if (detected.size === 0) {
+    try {
+      const res = await mssqlPool.request().query(`
+        SELECT DISTINCT TOP 10 hotelcode 
+        FROM dbo.trans_roomrateupdates_datewise 
+        WHERE hotelcode IS NOT NULL AND LTRIM(RTRIM(hotelcode)) <> ''
+      `);
+      if (res.recordset) {
+        for (const row of res.recordset) {
+          if (row.hotelcode) detected.add(row.hotelcode.trim().toUpperCase());
+        }
+      }
+    } catch (e) {}
+  }
+
+  // 4. Fallback: Try checking reservations_booklogic
+  if (detected.size === 0) {
+    try {
+      const res = await mssqlPool.request().query(`
+        SELECT DISTINCT TOP 10 Hotel_Code 
+        FROM dbo.reservations_booklogic 
+        WHERE Hotel_Code IS NOT NULL AND LTRIM(RTRIM(Hotel_Code)) <> ''
+      `);
+      if (res.recordset) {
+        for (const row of res.recordset) {
+          if (row.Hotel_Code) detected.add(row.Hotel_Code.trim().toUpperCase());
+        }
+      }
+    } catch (e) {}
+  }
+
+  cachedDiscoveredHotelCodes = Array.from(detected);
+  return cachedDiscoveredHotelCodes;
+}
+
+// --------------------------------------------------------------------------------------
 // INBOUND SYNC: VPS PostgreSQL (BOOKLOGIC) ➔ Local SQL Server (varanashiinn)
 // --------------------------------------------------------------------------------------
 async function syncInboundReservations() {
@@ -612,23 +1029,67 @@ async function syncInboundReservations() {
   try {
     pgClient = await pgPool.connect();
 
-    // Query reservations from PostgreSQL BOOKLOGIC database where updateflag / Updateflag is 0
+    // Handle repush target if specified
+    if (REPUSH_BOOKING_TARGET) {
+      try {
+        if (REPUSH_BOOKING_TARGET.toLowerCase() === 'all' || REPUSH_BOOKING_TARGET === '*') {
+          await pgClient.query(`UPDATE ${pgTables.reservations} SET ${pgReservationUpdateFlagCol} = 0`);
+          log('info', `[REPUSH] 🔄 Reset ${pgReservationUpdateFlagCol} = 0 for ALL bookings on VPS!`);
+        } else {
+          await pgClient.query(`
+            UPDATE ${pgTables.reservations} 
+            SET ${pgReservationUpdateFlagCol} = 0 
+            WHERE ${pgReservationIdCol}::text = $1 OR "Booking_Id" ILIKE $2 OR booking_id ILIKE $2
+          `, [REPUSH_BOOKING_TARGET, `%${REPUSH_BOOKING_TARGET}%`]);
+          log('info', `[REPUSH] 🔄 Reset ${pgReservationUpdateFlagCol} = 0 for booking '${REPUSH_BOOKING_TARGET}' on VPS!`);
+        }
+        // Reset so it only resets once on startup
+        REPUSH_BOOKING_TARGET = '';
+      } catch (reErr) {
+        log('warn', `Notice during repush reset on VPS: ${reErr.message}`);
+      }
+    }
+
+    const activeHotelCodes = await getActiveHotelCodes();
     let qRes = null;
-    try {
-      qRes = await pgClient.query(`
-        SELECT * FROM ${pgTables.reservations}
-        WHERE COALESCE("Updateflag", updateflag, 0) = 0
-        ORDER BY "Res_id" ASC LIMIT 200
-      `);
-    } catch (e) {
+
+    if (activeHotelCodes && activeHotelCodes.length > 0) {
       try {
         qRes = await pgClient.query(`
           SELECT * FROM ${pgTables.reservations}
-          WHERE COALESCE(updateflag, 0) = 0
-          ORDER BY 1 ASC LIMIT 200
+          WHERE COALESCE(${pgReservationUpdateFlagCol}, 0) = 0
+            AND UPPER(${pgReservationHotelCol}::text) = ANY($1::text[])
+          ORDER BY ${pgReservationIdCol} ASC LIMIT 200
+        `, [activeHotelCodes]);
+      } catch (e) {
+        try {
+          qRes = await pgClient.query(`
+            SELECT * FROM ${pgTables.reservations}
+            WHERE COALESCE(${pgReservationUpdateFlagCol}, 0) = 0
+            ORDER BY ${pgReservationIdCol} ASC LIMIT 200
+          `);
+        } catch (e2) {
+          qRes = await pgClient.query(`SELECT * FROM ${pgTables.reservations} ORDER BY 1 ASC LIMIT 200`);
+        }
+      }
+    } else {
+      // Query reservations from PostgreSQL BOOKLOGIC database where updateflag / Updateflag is 0
+      try {
+        qRes = await pgClient.query(`
+          SELECT * FROM ${pgTables.reservations}
+          WHERE COALESCE(${pgReservationUpdateFlagCol}, 0) = 0
+          ORDER BY ${pgReservationIdCol} ASC LIMIT 200
         `);
-      } catch (e2) {
-        qRes = await pgClient.query(`SELECT * FROM ${pgTables.reservations} ORDER BY 1 ASC LIMIT 200`);
+      } catch (e) {
+        try {
+          qRes = await pgClient.query(`
+            SELECT * FROM ${pgTables.reservations}
+            WHERE COALESCE(updateflag, 0) = 0
+            ORDER BY 1 ASC LIMIT 200
+          `);
+        } catch (e2) {
+          qRes = await pgClient.query(`SELECT * FROM ${pgTables.reservations} ORDER BY 1 ASC LIMIT 200`);
+        }
       }
     }
 
@@ -638,13 +1099,15 @@ async function syncInboundReservations() {
       if (cycleCount === 1 || cycleCount % 10 === 0) {
         try {
           const totalRes = await pgClient.query(`SELECT COUNT(*) as count FROM ${pgTables.reservations}`);
-          log('diag', `PostgreSQL [${PG_DATABASE}].${pgTables.reservations}: ${totalRes.rows[0].count} total rows in table (0 pending sync).`);
+          const filterStr = activeHotelCodes.length > 0 ? ` (filtered by HotelCode [${activeHotelCodes.join(', ')}])` : '';
+          log('diag', `PostgreSQL [${PG_DATABASE}].${pgTables.reservations}: ${totalRes.rows[0].count} total rows in table (0 pending sync${filterStr}).`);
         } catch (e) {}
       }
       return 0;
     }
 
-    log('inbound', `Found ${pgRows.length} reservation(s) in VPS [${PG_DATABASE}] pending sync into local SQL Server...`);
+    const filterMsg = activeHotelCodes.length > 0 ? ` for Hotel Code(s) [${activeHotelCodes.join(', ')}]` : '';
+    log('inbound', `Found ${pgRows.length} reservation(s)${filterMsg} in VPS [${PG_DATABASE}] pending sync into local SQL Server...`);
 
     const committedResIds = [];
 
@@ -664,8 +1127,9 @@ async function syncInboundReservations() {
       const extResId = (getVal(r, 'externalreservationid', 'external_res_id') || '').toString();
       const service = (getVal(r, 'service') || '1').toString();
       const travelAgent = (getVal(r, 'travelagentname', 'travel_agent', 'agent_name') || 'BookLogic').toString();
-      const updateDate = safeDate(getVal(r, 'updatedate', 'update_date')) || new Date();
-      const modifyDate = safeDate(getVal(r, 'modifydate', 'modify_date'));
+      const updateDate = safeDate(getVal(r, 'updatedate', 'update_date')) || insertDate;
+      const rawModifyDate = getVal(r, 'modifydate', 'modify_date', 'modified_at');
+      const modifyDate = safeDate(rawModifyDate) || updateDate || insertDate;
       const cancelDate = safeDate(getVal(r, 'canceldate', 'cancel_date'));
       const currency = (getVal(r, 'currency') || 'EUR').toString();
       const status = (getVal(r, 'status') || 'CF').toString();
@@ -733,6 +1197,31 @@ async function syncInboundReservations() {
           }
         } catch (e) {}
 
+        // CLEAN UP ANY STALE / DUPLICATE CHILD ROWS FOR THIS RESBKID BEFORE RE-INSERTING
+        try {
+          const cleanReq = new sql.Request(mssqlPool);
+          cleanReq.input('resbkid', sql.BigInt, resbkidVal);
+          cleanReq.input('resId', sql.BigInt, resId);
+          await cleanReq.query(`
+            IF OBJECT_ID('dbo.Reservation_PerDay_details_Booklogic', 'U') IS NOT NULL
+              DELETE FROM dbo.Reservation_PerDay_details_Booklogic WHERE resbkid = @resbkid OR Resper_id = @resId;
+            IF OBJECT_ID('dbo.reservations_details_booklogic', 'U') IS NOT NULL
+              DELETE FROM dbo.reservations_details_booklogic WHERE resbkid = @resbkid OR Res_id = @resId;
+            IF OBJECT_ID('dbo.reservation_Customer_booklogic', 'U') IS NOT NULL
+              DELETE FROM dbo.reservation_Customer_booklogic WHERE resbkid = @resbkid OR Res_id = @resId;
+          `);
+        } catch (eClean) {
+          try {
+            const cleanReq2 = new sql.Request(mssqlPool);
+            cleanReq2.input('resbkid', sql.BigInt, resbkidVal);
+            await cleanReq2.query(`
+              DELETE FROM dbo.Reservation_PerDay_details_Booklogic WHERE resbkid = @resbkid;
+              DELETE FROM dbo.reservations_details_booklogic WHERE resbkid = @resbkid;
+              DELETE FROM dbo.reservation_Customer_booklogic WHERE resbkid = @resbkid;
+            `);
+          } catch (eClean2) {}
+        }
+
         // ==============================================================================
         // 2. CHILD TABLE 1: dbo.reservations_details_booklogic
         // ==============================================================================
@@ -741,12 +1230,12 @@ async function syncInboundReservations() {
           try {
             const dRes = await pgClient.query(`
               SELECT * FROM ${pgTables.details} 
-              WHERE res_id::text = $1 OR resid::text = $1 OR reservation_id::text = $1
+              WHERE ${pgReservationIdCol}::text = $1
             `, [String(resId)]);
             fetchedDetails = dRes.rows || [];
           } catch (e) {
             try {
-              const dRes2 = await pgClient.query(`SELECT * FROM ${pgTables.details} WHERE res_id = $1`, [resId]);
+              const dRes2 = await pgClient.query(`SELECT * FROM ${pgTables.details} WHERE "Res_id" = $1`, [resId]);
               fetchedDetails = dRes2.rows || [];
             } catch (e2) {}
           }
@@ -756,22 +1245,62 @@ async function syncInboundReservations() {
           for (let i = 0; i < fetchedDetails.length; i++) {
             const d = fetchedDetails[i];
             const detailId = safeNum(getVal(d, 'detail_id', 'id', 'detailid'), resId * 1000 + (i + 1));
+            const netPriceVal = safeNum(getVal(d, 'netprice', 'net_price', 'total', 'roomtotal', 'price', 'price_per_night'), totalAmount || 0);
+            const roomTotalVal = safeNum(getVal(d, 'roomtotal', 'room_total', 'netprice', 'total'), netPriceVal);
+            const taxIncludedVal = safeNum(getVal(d, 'taxincluded', 'tax_included', 'tax_amount', 'taxamount'), 0);
+            const taxExcludedVal = safeNum(getVal(d, 'taxexcluded', 'tax_excluded'), 0);
+            const totalPriceVal = safeNum(getVal(d, 'total', 'netprice', 'roomtotal'), netPriceVal);
+            const rateNameVal = (getVal(d, 'rate_name', 'ratename', 'rate_plan_code', 'rateplancode') || 'BAR').toString();
+            const roomTypeVal = (getVal(d, 'roomtype', 'room_type', 'room_type_name', 'roomtypename') || 'ST').toString();
+            const noofRoomsVal = safeNum(getVal(d, 'noofrooms', 'no_of_rooms', 'rooms_booked', 'roomsbooked', 'qty'), 1);
+            const checkinDateVal = safeDate(getVal(d, 'checkindate', 'check_in_date', 'check_in', 'checkin', 'fromdate')) || checkInDate;
+            const checkoutDateVal = safeDate(getVal(d, 'checkoutdate', 'check_out_date', 'check_out', 'checkout', 'todate')) || checkOutDate;
+
             const detailPayload = {
+              ...d,
               detail_id: detailId,
               Res_id: resId,
               resbkid: resbkidVal,
               Roomtypeid: safeNum(getVal(d, 'roomtypeid', 'room_type_id'), 101),
-              Room_Type_Name: (getVal(d, 'room_type_name', 'roomtypename') || 'Standard Deluxe').toString(),
-              Rooms_Booked: safeNum(getVal(d, 'rooms_booked', 'roomsbooked', 'qty'), 1),
-              Rate_Plan_Code: (getVal(d, 'rate_plan_code', 'rateplancode', 'rate_plan') || 'BAR').toString(),
-              Price_Per_Night: safeNum(getVal(d, 'price_per_night', 'pricepernight', 'rate', 'price'), totalAmount || 150.00),
-              Tax_Amount: safeNum(getVal(d, 'tax_amount', 'taxamount', 'tax'), 0.00),
-              Meal_Plan: (getVal(d, 'meal_plan', 'mealplan') || 'EP').toString(),
+              RoomType: roomTypeVal,
+              roomtype: roomTypeVal,
+              Room_Type: roomTypeVal,
+              Room_Type_Name: roomTypeVal,
+              NoofRooms: noofRoomsVal,
+              noofrooms: noofRoomsVal,
+              Rooms_Booked: noofRoomsVal,
+              rooms_booked: noofRoomsVal,
+              Checkindate: checkinDateVal,
+              checkindate: checkinDateVal,
+              Check_In: checkinDateVal,
+              Checkoutdate: checkoutDateVal,
+              checkoutdate: checkoutDateVal,
+              Check_Out: checkoutDateVal,
+              Netprice: netPriceVal,
+              netprice: netPriceVal,
+              RoomTotal: roomTotalVal,
+              roomtotal: roomTotalVal,
+              Total: totalPriceVal,
+              total: totalPriceVal,
+              Price: netPriceVal,
+              price: netPriceVal,
+              Price_Per_Night: netPriceVal,
+              price_per_night: netPriceVal,
+              Room_Rate: roomTotalVal,
+              room_rate: roomTotalVal,
+              TaxIncluded: taxIncludedVal,
+              taxincluded: taxIncludedVal,
+              TaxExcluded: taxExcludedVal,
+              taxexcluded: taxExcludedVal,
+              Tax_Amount: taxIncludedVal + taxExcludedVal,
+              tax_amount: taxIncludedVal + taxExcludedVal,
+              rate_name: rateNameVal,
+              Rate_Plan_Code: rateNameVal,
+              rate_plan_code: rateNameVal,
+              Meal_Plan: (getVal(d, 'meal_plan', 'mealplan', 'mealtotal') || 'EP').toString(),
               Adult: safeNum(getVal(d, 'adult', 'adults'), adult),
               Child: safeNum(getVal(d, 'child', 'children'), childA + childB),
               Nights: safeNum(getVal(d, 'nights', 'night_count'), 1),
-              Check_In: safeDate(getVal(d, 'check_in', 'checkin', 'fromdate')) || checkInDate,
-              Check_Out: safeDate(getVal(d, 'check_out', 'checkout', 'todate')) || checkOutDate,
               synced_at: new Date(),
               _synced_at: new Date()
             };
@@ -790,15 +1319,28 @@ async function syncInboundReservations() {
             Res_id: resId,
             resbkid: resbkidVal,
             Roomtypeid: 101,
+            RoomType: 'ST',
+            roomtype: 'ST',
             Room_Type_Name: 'Standard Room',
+            NoofRooms: 1,
             Rooms_Booked: 1,
             Rate_Plan_Code: 'BAR',
-            Price_Per_Night: totalAmount || 150.00,
+            rate_name: 'BAR',
+            Netprice: totalAmount || 0,
+            netprice: totalAmount || 0,
+            RoomTotal: totalAmount || 0,
+            roomtotal: totalAmount || 0,
+            Total: totalAmount || 0,
+            total: totalAmount || 0,
+            Price: totalAmount || 0,
+            Price_Per_Night: totalAmount || 0,
             Tax_Amount: 0.00,
             Meal_Plan: 'EP',
             Adult: adult,
             Child: childA + childB,
             Nights: 1,
+            Checkindate: checkInDate,
+            Checkoutdate: checkOutDate,
             Check_In: checkInDate,
             Check_Out: checkOutDate,
             synced_at: new Date(),
@@ -821,12 +1363,12 @@ async function syncInboundReservations() {
           try {
             const pRes = await pgClient.query(`
               SELECT * FROM ${pgTables.perday} 
-              WHERE res_id::text = $1 OR resid::text = $1 OR reservation_id::text = $1
+              WHERE ${pgReservationIdCol}::text = $1
             `, [String(resId)]);
             fetchedPerDay = pRes.rows || [];
           } catch (e) {
             try {
-              const pRes2 = await pgClient.query(`SELECT * FROM ${pgTables.perday} WHERE res_id = $1`, [resId]);
+              const pRes2 = await pgClient.query(`SELECT * FROM ${pgTables.perday} WHERE "Res_id" = $1`, [resId]);
               fetchedPerDay = pRes2.rows || [];
             } catch (e2) {}
           }
@@ -836,19 +1378,50 @@ async function syncInboundReservations() {
           for (let i = 0; i < fetchedPerDay.length; i++) {
             const p = fetchedPerDay[i];
             const perdayId = safeNum(getVal(p, 'perday_id', 'id', 'perdayid'), resId * 1000 + (i + 1));
-            const roomRate = safeNum(getVal(p, 'room_rate', 'roomrate', 'rate', 'price'), 120.00);
-            const taxAmt = safeNum(getVal(p, 'tax_amount', 'taxamount', 'tax'), 0.00);
+            const priceVal = safeNum(getVal(p, 'price', 'room_rate', 'roomrate', 'rate', 'total_amount', 'totalamount', 'total', 'netprice'), 0);
+            const dateVal = safeDate(getVal(p, 'date', 'rate_date', 'ratedate', 'checkindate', 'fromdate')) || checkInDate;
+            const rmNoVal = safeNum(getVal(p, 'rm_no', 'rmno', 'room_no', 'roomno', 'rooms_booked'), 1);
+            const hotelCodeVal = (getVal(p, 'hotel_code', 'hotelcode', 'hotel_id') || hotelCode).toString();
+            const bookingIdVal = (getVal(p, 'booking_id', 'bookingid', 'reservation_no') || bookingId).toString();
+            const taxVal = safeNum(getVal(p, 'tax_amount', 'taxamount', 'tax', 'taxincluded', 'taxexcluded'), 0);
 
             const perDayPayload = {
+              ...p,
               perday_id: perdayId,
+              resbkpdid: perdayId,
               Res_id: resId,
+              Resper_id: resId,
+              resper_id: resId,
               resbkid: resbkidVal,
               detail_id: safeNum(getVal(p, 'detail_id', 'detailid'), resId * 1000 + 1),
-              Rate_Date: safeDate(getVal(p, 'rate_date', 'ratedate', 'date')) || checkInDate,
+              Hotel_Code: hotelCodeVal,
+              hotel_code: hotelCodeVal,
+              HotelCode: hotelCodeVal,
+              hotelcode: hotelCodeVal,
+              Booking_Id: bookingIdVal,
+              booking_id: bookingIdVal,
+              BookingId: bookingIdVal,
+              bookingid: bookingIdVal,
+              Date: dateVal,
+              date: dateVal,
+              Rate_Date: dateVal,
+              rate_date: dateVal,
+              ratedate: dateVal,
+              rm_no: rmNoVal,
+              rmno: rmNoVal,
+              RoomNo: rmNoVal,
+              room_no: rmNoVal,
+              Price: priceVal,
+              price: priceVal,
+              Room_Rate: priceVal,
+              room_rate: priceVal,
+              roomrate: priceVal,
+              Total_Amount: priceVal,
+              total_amount: priceVal,
+              totalamount: priceVal,
+              Tax_Amount: taxVal,
+              tax_amount: taxVal,
               Roomtypeid: safeNum(getVal(p, 'roomtypeid', 'room_type_id'), 101),
-              Room_Rate: roomRate,
-              Tax_Amount: taxAmt,
-              Total_Amount: safeNum(getVal(p, 'total_amount', 'totalamount', 'total'), roomRate + taxAmt),
               synced_at: new Date(),
               _synced_at: new Date()
             };
@@ -867,11 +1440,17 @@ async function syncInboundReservations() {
             Res_id: resId,
             resbkid: resbkidVal,
             detail_id: resId * 1000 + 1,
+            Hotel_Code: hotelCode,
+            Booking_Id: bookingId,
+            Date: checkInDate,
             Rate_Date: checkInDate,
+            rm_no: 1,
             Roomtypeid: 101,
-            Room_Rate: totalAmount || 150.00,
+            Price: totalAmount || 0,
+            price: totalAmount || 0,
+            Room_Rate: totalAmount || 0,
+            Total_Amount: totalAmount || 0,
             Tax_Amount: 0.00,
-            Total_Amount: totalAmount || 150.00,
             synced_at: new Date(),
             _synced_at: new Date()
           };
@@ -892,12 +1471,12 @@ async function syncInboundReservations() {
           try {
             const cRes = await pgClient.query(`
               SELECT * FROM ${pgTables.customer} 
-              WHERE res_id::text = $1 OR resid::text = $1 OR reservation_id::text = $1
+              WHERE ${pgReservationIdCol}::text = $1
             `, [String(resId)]);
             fetchedCustomer = cRes.rows || [];
           } catch (e) {
             try {
-              const cRes2 = await pgClient.query(`SELECT * FROM ${pgTables.customer} WHERE res_id = $1`, [resId]);
+              const cRes2 = await pgClient.query(`SELECT * FROM ${pgTables.customer} WHERE "Res_id" = $1`, [resId]);
               fetchedCustomer = cRes2.rows || [];
             } catch (e2) {}
           }
@@ -971,25 +1550,24 @@ async function syncInboundReservations() {
       }
     }
 
-    // Set Updateflag = 1, updateflag = 1, and synced_at = CURRENT_TIMESTAMP in VPS PostgreSQL BOOKLOGIC
+    // Set Updateflag = 1 and synced_at in VPS PostgreSQL BOOKLOGIC
     if (committedResIds.length > 0) {
       try {
         await pgClient.query(`
           UPDATE ${pgTables.reservations}
-          SET "Updateflag" = 1,
-              "updateflag" = 1,
+          SET ${pgReservationUpdateFlagCol} = 1,
               "synced_at" = CURRENT_TIMESTAMP
-          WHERE "Res_id" = ANY($1::bigint[]) OR res_id = ANY($1::bigint[]) OR "Res_id" = ANY($1::int[]) OR res_id = ANY($1::int[])
+          WHERE ${pgReservationIdCol} = ANY($1::bigint[]) OR ${pgReservationIdCol} = ANY($1::int[])
         `, [committedResIds]);
-        log('success', `[INBOUND] 🔄 Successfully marked Updateflag = 1 and synced_at in VPS BOOKLOGIC for Res_ids: [${committedResIds.join(', ')}]`);
+        log('success', `[INBOUND] 🔄 Successfully marked ${pgReservationUpdateFlagCol} = 1 and synced_at in VPS BOOKLOGIC for Res_ids: [${committedResIds.join(', ')}]`);
       } catch (flagErr) {
         try {
           await pgClient.query(`
             UPDATE ${pgTables.reservations}
-            SET updateflag = 1, synced_at = CURRENT_TIMESTAMP
-            WHERE res_id = ANY($1::bigint[]) OR res_id = ANY($1::int[])
+            SET ${pgReservationUpdateFlagCol} = 1
+            WHERE ${pgReservationIdCol} = ANY($1::bigint[]) OR ${pgReservationIdCol} = ANY($1::int[])
           `, [committedResIds]);
-          log('success', `[INBOUND] 🔄 Successfully marked updateflag = 1 in VPS BOOKLOGIC for Res_ids: [${committedResIds.join(', ')}]`);
+          log('success', `[INBOUND] 🔄 Successfully marked ${pgReservationUpdateFlagCol} = 1 in VPS BOOKLOGIC for Res_ids: [${committedResIds.join(', ')}]`);
         } catch (fErr2) {
           log('warn', `Notice setting updateflag in PG BOOKLOGIC: ${fErr2.message}`);
         }
@@ -1011,10 +1589,22 @@ async function syncInboundReservations() {
 async function syncOutboundRoomAvailability() {
   let pgClient = null;
   try {
+    const activeHotelCodes = await getActiveHotelCodes();
+    const primaryHotelCode = activeHotelCodes.length > 0 ? activeHotelCodes[0] : 'IZM2366';
+
+    // Only filter by hotelcode in SQL Server if the local table actually has that column!
+    let hotelFilterSql = '';
+    const hasHotelColInLocal = mssqlColumns.availability.has('hotelcode') || mssqlColumns.availability.has('hotel_code');
+    if (hasHotelColInLocal && activeHotelCodes.length > 0) {
+      const colObj = mssqlColumns.availability.get('hotelcode') || mssqlColumns.availability.get('hotel_code');
+      const localColName = colObj ? colObj.name : 'hotelcode';
+      hotelFilterSql = `AND (${localColName} IS NULL OR LTRIM(RTRIM(${localColName})) = '' OR UPPER(${localColName}) IN (${activeHotelCodes.map(h => `'${h}'`).join(',')}))`;
+    }
+
     const result = await mssqlPool.request().query(`
       SELECT TOP 500 *
       FROM dbo.trans_roomavailability_chart_datewise
-      WHERE ISNULL(uploadflg, 0) = 0
+      WHERE ISNULL(uploadflg, 0) = 0 ${hotelFilterSql}
       ORDER BY avaidd ASC
     `);
 
@@ -1036,7 +1626,7 @@ async function syncOutboundRoomAvailability() {
       const fromtime = safeDate(getVal(row, 'fromtime', 'from_time'));
       const totime = safeDate(getVal(row, 'totime', 'to_time'));
       const allotcode = getVal(row, 'allotcode', 'allot_code') ? String(getVal(row, 'allotcode', 'allot_code')) : '';
-      const hotelcode = getVal(row, 'hotelcode', 'hotel_code') ? String(getVal(row, 'hotelcode', 'hotel_code')) : 'IZM2366';
+      const hotelcode = (getVal(row, 'hotelcode', 'hotel_code') || primaryHotelCode).toString();
       const irm_update = safeNum(getVal(row, 'irm_update', 'irmupdate'), 0);
       const stopsales = safeNum(getVal(row, 'stopsales', 'stop_sales'), 0);
 
@@ -1110,7 +1700,7 @@ async function syncOutboundRoomAvailability() {
           WHERE avaidd IN (${chunk.join(',')})
         `);
       }
-      log('outbound', `Pushed ${syncedAvaids.length} Room Availability records to VPS BOOKLOGIC and marked uploadflg = 1 in SQL Server.`);
+      log('outbound', `Pushed ${syncedAvaids.length} Room Availability records for Hotel [${primaryHotelCode}] to VPS BOOKLOGIC and marked uploadflg = 1 in SQL Server.`);
     }
 
     return syncedAvaids.length;
@@ -1133,10 +1723,22 @@ async function syncOutboundRoomRates() {
     `);
     if (!tableCheck.recordset || tableCheck.recordset.length === 0) return 0;
 
+    const activeHotelCodes = await getActiveHotelCodes();
+    const primaryHotelCode = activeHotelCodes.length > 0 ? activeHotelCodes[0] : 'IZM2366';
+
+    // Only filter by hotelcode in SQL Server if the local table actually has that column!
+    let hotelFilterSql = '';
+    const hasHotelColInLocal = mssqlColumns.rateupdates.has('hotelcode') || mssqlColumns.rateupdates.has('hotel_code');
+    if (hasHotelColInLocal && activeHotelCodes.length > 0) {
+      const colObj = mssqlColumns.rateupdates.get('hotelcode') || mssqlColumns.rateupdates.get('hotel_code');
+      const localColName = colObj ? colObj.name : 'hotelcode';
+      hotelFilterSql = `AND (${localColName} IS NULL OR LTRIM(RTRIM(${localColName})) = '' OR UPPER(${localColName}) IN (${activeHotelCodes.map(h => `'${h}'`).join(',')}))`;
+    }
+
     const result = await mssqlPool.request().query(`
       SELECT TOP 500 *
       FROM dbo.trans_roomrateupdates_datewise
-      WHERE ISNULL(uploadflg, 0) = 0
+      WHERE ISNULL(uploadflg, 0) = 0 ${hotelFilterSql}
       ORDER BY rateid ASC
     `);
 
@@ -1158,7 +1760,7 @@ async function syncOutboundRoomRates() {
       const quadrate = safeNum(getVal(row, 'quadrate', 'quad_rate'), 0);
       const extrabed = safeNum(getVal(row, 'extrabed', 'extra_bed'), 0);
       const childrate = safeNum(getVal(row, 'childrate', 'child_rate'), 0);
-      const hotelcode = getVal(row, 'hotelcode', 'hotel_code') ? String(getVal(row, 'hotelcode', 'hotel_code')) : 'IZM2366';
+      const hotelcode = (getVal(row, 'hotelcode', 'hotel_code') || primaryHotelCode).toString();
       const rateplancode = getVal(row, 'rateplancode', 'rate_plan_code', 'rateplan') ? String(getVal(row, 'rateplancode', 'rate_plan_code', 'rateplan')) : 'BAR';
 
       await pgClient.query(`
@@ -1210,7 +1812,7 @@ async function syncOutboundRoomRates() {
           WHERE rateid IN (${chunk.join(',')})
         `);
       }
-      log('outbound', `Pushed ${syncedRateIds.length} Room Rate Updates to VPS BOOKLOGIC and marked uploadflg = 1 in SQL Server.`);
+      log('outbound', `Pushed ${syncedRateIds.length} Room Rate Updates for Hotel [${primaryHotelCode}] to VPS BOOKLOGIC and marked uploadflg = 1 in SQL Server.`);
     }
 
     return syncedRateIds.length;
@@ -1262,6 +1864,13 @@ async function startReplicationAgent() {
     await connectToPostgresBooklogic();
 
     log('info', `Replication Daemon ACTIVE: VPS "${PG_DATABASE}" ⇄ Local SQL Server "${MSSQL_DATABASE_INPUT}"`);
+
+    const activeHotels = await getActiveHotelCodes();
+    if (activeHotels && activeHotels.length > 0) {
+      log('info', `Hotel Code Filter : [${activeHotels.join(', ')}] (Filtering VPS bookings for this hotel)`);
+    } else {
+      log('info', `Hotel Code Filter : ALL (Unfiltered / Syncing all pending bookings)`);
+    }
 
     // Run first cycle immediately
     await runReplicationCycle();
