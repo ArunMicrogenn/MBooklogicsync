@@ -46,7 +46,7 @@ echo [1/3] Creating invisible background launcher (start_win7_silent.vbs)...
 echo Set WshShell = CreateObject^("WScript.Shell"^)
 echo Set FSO = CreateObject^("Scripting.FileSystemObject"^)
 echo CurrentDir = FSO.GetParentFolderName^(WScript.ScriptFullName^)
-echo Cmd = "cmd.exe /c cd /d """ ^& CurrentDir ^& """ ^&^& node sync_agent.js"
+echo Cmd = "cmd.exe /c cd /d """ ^& CurrentDir ^& """ ^&^& node --harmony sync_agent.js"
 echo WshShell.Run Cmd, 0, False
 ) > "%~dp0start_win7_silent.vbs"
 

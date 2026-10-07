@@ -17,6 +17,19 @@
  * ====================================================================================================
  */
 
+// Compatibility polyfill for Node.js < 14.18 (Windows 7 / legacy environments)
+// Resolves 'node:events', 'node:stream', 'node:fs', etc. to core modules 'events', 'stream', 'fs'
+const Module = require('module');
+if (Module && Module.prototype) {
+  const originalRequire = Module.prototype.require;
+  Module.prototype.require = function (moduleName) {
+    if (typeof moduleName === 'string' && moduleName.startsWith('node:')) {
+      return originalRequire.call(this, moduleName.slice(5));
+    }
+    return originalRequire.apply(this, arguments);
+  };
+}
+
 require('dotenv').config();
 const sql = require('mssql');
 const { Pool, Client } = require('pg');

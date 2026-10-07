@@ -8,7 +8,7 @@ Set FSO = CreateObject("Scripting.FileSystemObject")
 ' Get current script directory
 CurrentDir = FSO.GetParentFolderName(WScript.ScriptFullName)
 
-' Command to execute in hidden mode (0 = hide window, false = do not wait)
-Cmd = "cmd.exe /c cd /d """ & CurrentDir & """ && node sync_agent.js"
+' Command to execute in hidden mode with --harmony for Node 13/14 compatibility
+Cmd = "cmd.exe /c cd /d """ & CurrentDir & """ && node --harmony sync_agent.js"
 
 WshShell.Run Cmd, 0, False

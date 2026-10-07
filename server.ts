@@ -3168,9 +3168,28 @@ CREATE INDEX IF NOT EXISTS idx_roomavail_dates ON public.trans_roomavailability_
     }
   };
 
+  const sendFixWin7DepsBat = (req: express.Request, res: express.Response) => {
+    try {
+      const filePath = path.join(process.cwd(), 'fix_win7_deps.bat');
+      if (fs.existsSync(filePath)) {
+        const content = fs.readFileSync(filePath, 'utf8');
+        res.setHeader('Content-Disposition', 'attachment; filename="fix_win7_deps.bat"');
+        res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+        res.type('text/plain').send(content);
+      } else {
+        res.status(404).send('@rem fix_win7_deps.bat not found');
+      }
+    } catch (err: unknown) {
+      res.status(500).send(`@rem Error reading fix_win7_deps.bat: ${err}`);
+    }
+  };
+
   app.get('/install_win7.bat', sendInstallWin7Bat);
   app.get('/api/install_win7.bat', sendInstallWin7Bat);
   app.get('/api/download-install-win7', sendInstallWin7Bat);
+  app.get('/fix_win7_deps.bat', sendFixWin7DepsBat);
+  app.get('/api/fix_win7_deps.bat', sendFixWin7DepsBat);
+  app.get('/api/download-fix-win7-deps', sendFixWin7DepsBat);
   app.get('/start_win7_silent.vbs', sendStartWin7Vbs);
   app.get('/api/start_win7_silent.vbs', sendStartWin7Vbs);
   app.get('/check_win7.bat', sendCheckWin7Bat);

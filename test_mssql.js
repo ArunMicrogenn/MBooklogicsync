@@ -7,6 +7,18 @@
  * ====================================================================================================
  */
 
+// Compatibility polyfill for Node.js < 14.18 (Windows 7 / legacy environments)
+const Module = require('module');
+if (Module && Module.prototype) {
+  const originalRequire = Module.prototype.require;
+  Module.prototype.require = function (moduleName) {
+    if (typeof moduleName === 'string' && moduleName.startsWith('node:')) {
+      return originalRequire.call(this, moduleName.slice(5));
+    }
+    return originalRequire.apply(this, arguments);
+  };
+}
+
 const sql = require('mssql');
 const { execSync } = require('child_process');
 const os = require('os');
