@@ -3104,6 +3104,80 @@ CREATE INDEX IF NOT EXISTS idx_roomavail_dates ON public.trans_roomavailability_
     }
   };
 
+  const sendInstallWin7Bat = (req: express.Request, res: express.Response) => {
+    try {
+      const filePath = path.join(process.cwd(), 'install_win7.bat');
+      if (fs.existsSync(filePath)) {
+        const content = fs.readFileSync(filePath, 'utf8');
+        res.setHeader('Content-Disposition', 'attachment; filename="install_win7.bat"');
+        res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+        res.type('text/plain').send(content);
+      } else {
+        res.status(404).send('@rem install_win7.bat not found');
+      }
+    } catch (err: unknown) {
+      res.status(500).send(`@rem Error reading install_win7.bat: ${err}`);
+    }
+  };
+
+  const sendStartWin7Vbs = (req: express.Request, res: express.Response) => {
+    try {
+      const filePath = path.join(process.cwd(), 'start_win7_silent.vbs');
+      if (fs.existsSync(filePath)) {
+        const content = fs.readFileSync(filePath, 'utf8');
+        res.setHeader('Content-Disposition', 'attachment; filename="start_win7_silent.vbs"');
+        res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+        res.type('text/plain').send(content);
+      } else {
+        res.status(404).send("' start_win7_silent.vbs not found");
+      }
+    } catch (err: unknown) {
+      res.status(500).send(`' Error reading start_win7_silent.vbs: ${err}`);
+    }
+  };
+
+  const sendCheckWin7Bat = (req: express.Request, res: express.Response) => {
+    try {
+      const filePath = path.join(process.cwd(), 'check_win7.bat');
+      if (fs.existsSync(filePath)) {
+        const content = fs.readFileSync(filePath, 'utf8');
+        res.setHeader('Content-Disposition', 'attachment; filename="check_win7.bat"');
+        res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+        res.type('text/plain').send(content);
+      } else {
+        res.status(404).send('@rem check_win7.bat not found');
+      }
+    } catch (err: unknown) {
+      res.status(500).send(`@rem Error reading check_win7.bat: ${err}`);
+    }
+  };
+
+  const sendStopWin7Bat = (req: express.Request, res: express.Response) => {
+    try {
+      const filePath = path.join(process.cwd(), 'stop_win7.bat');
+      if (fs.existsSync(filePath)) {
+        const content = fs.readFileSync(filePath, 'utf8');
+        res.setHeader('Content-Disposition', 'attachment; filename="stop_win7.bat"');
+        res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+        res.type('text/plain').send(content);
+      } else {
+        res.status(404).send('@rem stop_win7.bat not found');
+      }
+    } catch (err: unknown) {
+      res.status(500).send(`@rem Error reading stop_win7.bat: ${err}`);
+    }
+  };
+
+  app.get('/install_win7.bat', sendInstallWin7Bat);
+  app.get('/api/install_win7.bat', sendInstallWin7Bat);
+  app.get('/api/download-install-win7', sendInstallWin7Bat);
+  app.get('/start_win7_silent.vbs', sendStartWin7Vbs);
+  app.get('/api/start_win7_silent.vbs', sendStartWin7Vbs);
+  app.get('/check_win7.bat', sendCheckWin7Bat);
+  app.get('/api/check_win7.bat', sendCheckWin7Bat);
+  app.get('/stop_win7.bat', sendStopWin7Bat);
+  app.get('/api/stop_win7.bat', sendStopWin7Bat);
+
   app.get('/api/sync_agent.js', sendSyncAgent);
   app.get('/api/sync-agent.js', sendSyncAgent);
   app.get('/sync_agent.js', sendSyncAgent);
