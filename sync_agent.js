@@ -1837,6 +1837,15 @@ async function syncOutboundRoomRates() {
   }
 }
 
+// Global safety guards to prevent service from ever stopping on unhandled errors
+process.on('uncaughtException', (err) => {
+  log('error', `[WATCHDOG] Uncaught Exception caught: ${err.message}`, err.stack);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  log('error', `[WATCHDOG] Unhandled Promise Rejection: ${reason}`);
+});
+
 // --------------------------------------------------------------------------------------
 // MAIN CONTINUOUS REPLICATION LOOP
 // --------------------------------------------------------------------------------------
@@ -1846,6 +1855,28 @@ async function runReplicationCycle() {
   cycleCount++;
 
   try {
+    // Check & ensure SQL Server connection is active
+    if (!mssqlPool || !mssqlPool.connected) {
+      log('warn', `SQL Server connection lost. Re-connecting...`);
+      try {
+        mssqlPool = await connectToSqlServer();
+      } catch (reConnErr) {
+        log('error', `SQL Server re-connection failed: ${reConnErr.message}`);
+        return;
+      }
+    }
+
+    // Check & ensure PostgreSQL connection is active
+    if (!pgPool) {
+      log('warn', `PostgreSQL connection lost. Re-connecting...`);
+      try {
+        await connectToPostgresBooklogic();
+      } catch (pgConnErr) {
+        log('error', `PostgreSQL re-connection failed: ${pgConnErr.message}`);
+        return;
+      }
+    }
+
     // 1. Inbound Sync: VPS PostgreSQL BOOKLOGIC ➔ Local SQL Server varanashiinn
     const inCount = await syncInboundReservations();
 
@@ -1857,7 +1888,7 @@ async function runReplicationCycle() {
       log('info', `Cycle #${cycleCount} complete: 📥 ${inCount} Inbound Reservation(s) (4 tables) | 📤 ${outAvail} Availability + ${outRates} Rates.`);
     }
   } catch (err) {
-    log('error', `Replication cycle error: ${err.message}`);
+    log('error', `Replication cycle error (auto-recovering in next cycle): ${err.message}`);
   } finally {
     isSyncRunning = false;
   }
@@ -1865,35 +1896,54 @@ async function runReplicationCycle() {
 
 async function startReplicationAgent() {
   console.log('================================================================');
-  console.log('  🚀 BOOKLOGIC Dedicated Bidirectional Replication Agent');
+  console.log('  🚀 BOOKLOGIC Dedicated Bidirectional Replication Agent (Watchdog Active)');
   console.log('================================================================');
   console.log(`Local SQL Server  : ${parsedMssql.server} (DB: ${MSSQL_DATABASE_INPUT})`);
   console.log(`VPS PostgreSQL    : ${PG_HOST}:${PG_PORT} (DB: ${PG_DATABASE})`);
   console.log(`Polling Interval  : ${SYNC_INTERVAL_MS} ms`);
   console.log('================================================================\n');
 
-  try {
-    mssqlPool = await connectToSqlServer();
-    await connectToPostgresBooklogic();
+  while (true) {
+    try {
+      mssqlPool = await connectToSqlServer();
+      await connectToPostgresBooklogic();
 
-    log('info', `Replication Daemon ACTIVE: VPS "${PG_DATABASE}" ⇄ Local SQL Server "${MSSQL_DATABASE_INPUT}"`);
+      log('info', `Replication Daemon ACTIVE: VPS "${PG_DATABASE}" ⇄ Local SQL Server "${MSSQL_DATABASE_INPUT}"`);
 
-    const activeHotels = await getActiveHotelCodes();
-    if (activeHotels && activeHotels.length > 0) {
-      log('info', `Hotel Code Filter : [${activeHotels.join(', ')}] (Filtering VPS bookings for this hotel)`);
-    } else {
-      log('info', `Hotel Code Filter : ALL (Unfiltered / Syncing all pending bookings)`);
+      const activeHotels = await getActiveHotelCodes();
+      if (activeHotels && activeHotels.length > 0) {
+        log('info', `Hotel Code Filter : [${activeHotels.join(', ')}] (Filtering VPS bookings for this hotel)`);
+      } else {
+        log('info', `Hotel Code Filter : ALL (Unfiltered / Syncing all pending bookings)`);
+      }
+
+      // Run first cycle immediately
+      await runReplicationCycle();
+
+      // Start interval loop
+      const intervalId = setInterval(runReplicationCycle, SYNC_INTERVAL_MS);
+
+      // Keep alive until disconnect
+      await new Promise((resolve) => {
+        const checkInterval = setInterval(() => {
+          if (!mssqlPool || !mssqlPool.connected) {
+            clearInterval(checkInterval);
+            clearInterval(intervalId);
+            resolve();
+          }
+        }, 5000);
+      });
+
+    } catch (err) {
+      log('error', `[WATCHDOG] Connection or startup error: ${err.message}. Retrying connection in 10 seconds...`);
+      try { if (mssqlPool) await mssqlPool.close(); } catch (e) {}
+      try { if (pgPool) await pgPool.end(); } catch (e) {}
+      mssqlPool = null;
+      pgPool = null;
     }
-
-    // Run first cycle immediately
-    await runReplicationCycle();
-
-    // Loop
-    setInterval(runReplicationCycle, SYNC_INTERVAL_MS);
-
-  } catch (err) {
-    log('error', `Fatal Agent Initialization Failure: ${err.message}`);
-    process.exit(1);
+    
+    // Wait 10 seconds before retry
+    await new Promise(r => setTimeout(r, 10000));
   }
 }
 
