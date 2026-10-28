@@ -13,7 +13,7 @@ export const DataParityInspector: React.FC<DataParityInspectorProps> = ({
   onRefresh,
   onSimulateMutation,
 }) => {
-  const [selectedTable, setSelectedTable] = useState<'customers' | 'orders' | 'inventory' | 'mas_hotel' | 'reservations'>('mas_hotel');
+  const [selectedTable, setSelectedTable] = useState<'customers' | 'orders' | 'inventory' | 'mas_hotel' | 'reservations' | 'Ota_exeinfo'>('mas_hotel');
   const [showAddModal, setShowAddModal] = useState(false);
   const [newFirstName, setNewFirstName] = useState('');
   const [newLastName, setNewLastName] = useState('');
@@ -126,6 +126,122 @@ export const DataParityInspector: React.FC<DataParityInspectorProps> = ({
             </button>
           )}
 
+          {selectedTable === 'Ota_exeinfo' && (
+            <div className="flex items-center flex-wrap gap-1.5">
+              <button
+                onClick={async () => {
+                  await fetch('/api/ota-exeinfo', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                      workingstate: 0,
+                      notworkingstate: 1,
+                      infoscrollflg: 1,
+                      otaexeinfo: 'Bookings Sync Error: Foreign key link Res_id mismatch or table timeout',
+                    }),
+                  });
+                  onRefresh();
+                }}
+                className="px-2 py-1 rounded text-[11px] font-semibold bg-rose-50 text-rose-700 border border-rose-200 hover:bg-rose-100 transition"
+                title="Test Bookings sync failure update in Ota_exeinfo"
+              >
+                Booking Error
+              </button>
+              <button
+                onClick={async () => {
+                  await fetch('/api/ota-exeinfo', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                      workingstate: 0,
+                      notworkingstate: 1,
+                      infoscrollflg: 1,
+                      otaexeinfo: 'Room Inventory Update Error: Roomtypeid/date constraint failure in VPS PostgreSQL',
+                    }),
+                  });
+                  onRefresh();
+                }}
+                className="px-2 py-1 rounded text-[11px] font-semibold bg-purple-50 text-purple-700 border border-purple-200 hover:bg-purple-100 transition"
+                title="Test Room Inventory update failure in Ota_exeinfo"
+              >
+                Inventory Error
+              </button>
+              <button
+                onClick={async () => {
+                  await fetch('/api/ota-exeinfo', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                      workingstate: 0,
+                      notworkingstate: 1,
+                      infoscrollflg: 1,
+                      otaexeinfo: 'Room Rate Update Error: Rateid upsert failure in trans_roomrateupdates_datewise',
+                    }),
+                  });
+                  onRefresh();
+                }}
+                className="px-2 py-1 rounded text-[11px] font-semibold bg-indigo-50 text-indigo-700 border border-indigo-200 hover:bg-indigo-100 transition"
+                title="Test Room Rate update failure in Ota_exeinfo"
+              >
+                Rate Error
+              </button>
+              <button
+                onClick={async () => {
+                  await fetch('/api/ota-exeinfo', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                      workingstate: 0,
+                      notworkingstate: 1,
+                      infoscrollflg: 1,
+                      otaexeinfo: 'Network Issue: Unable to connect to BookLogic VPS (72.61.240.34)',
+                    }),
+                  });
+                  onRefresh();
+                }}
+                className="px-2 py-1 rounded text-[11px] font-semibold bg-red-50 text-red-700 border border-red-200 hover:bg-red-100 transition"
+              >
+                Network Error
+              </button>
+              <button
+                onClick={async () => {
+                  await fetch('/api/ota-exeinfo', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                      workingstate: 0,
+                      notworkingstate: 1,
+                      infoscrollflg: 1,
+                      otaexeinfo: 'BookLogic Sync Service Stopped (Service Stop)',
+                    }),
+                  });
+                  onRefresh();
+                }}
+                className="px-2 py-1 rounded text-[11px] font-semibold bg-amber-50 text-amber-700 border border-amber-200 hover:bg-amber-100 transition"
+              >
+                Service Stopped
+              </button>
+              <button
+                onClick={async () => {
+                  await fetch('/api/ota-exeinfo', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                      workingstate: 1,
+                      notworkingstate: 0,
+                      infoscrollflg: 0,
+                      otaexeinfo: 'BookLogic Sync Service Running Normally',
+                    }),
+                  });
+                  onRefresh();
+                }}
+                className="px-2 py-1 rounded text-[11px] font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-100 transition"
+              >
+                Running Normally
+              </button>
+            </div>
+          )}
+
           <button
             onClick={onRefresh}
             className="p-1.5 rounded-lg text-zinc-500 hover:text-zinc-800 hover:bg-zinc-100 transition"
@@ -175,6 +291,12 @@ export const DataParityInspector: React.FC<DataParityInspectorProps> = ({
             className={`px-3 py-1 rounded-md font-medium transition ${selectedTable === 'reservations' ? 'bg-purple-900 text-white shadow-xs font-semibold' : 'text-purple-700 hover:text-purple-950'}`}
           >
             reservations (Inbound: {dataComparison.reservations?.sourceCount || 0})
+          </button>
+          <button
+            onClick={() => setSelectedTable('Ota_exeinfo')}
+            className={`px-3 py-1 rounded-md font-medium transition ${selectedTable === 'Ota_exeinfo' ? 'bg-amber-600 text-white shadow-xs font-semibold' : 'text-amber-800 hover:text-amber-950 bg-amber-50'}`}
+          >
+            Ota_exeinfo (PMS Status)
           </button>
         </div>
 
@@ -337,6 +459,15 @@ export const DataParityInspector: React.FC<DataParityInspectorProps> = ({
                     <th className="px-3 py-2">Total Amount</th>
                   </tr>
                 )}
+                {selectedTable === 'Ota_exeinfo' && (
+                  <tr>
+                    <th className="px-3 py-2">Date (otaexesysdate)</th>
+                    <th className="px-3 py-2">Time (otaexesystime)</th>
+                    <th className="px-3 py-2">State</th>
+                    <th className="px-3 py-2">Info Message (otaexeinfo)</th>
+                    <th className="px-3 py-2">Scroll</th>
+                  </tr>
+                )}
               </thead>
               <tbody className="divide-y divide-zinc-100">
                 {selectedTable === 'mas_hotel' && (current.sourceRows as any[]).map((row, idx) => (
@@ -398,6 +529,32 @@ export const DataParityInspector: React.FC<DataParityInspectorProps> = ({
                     <td className="px-3 py-2 text-zinc-600 font-mono text-[11px]">{String(row.check_in).substring(0, 10)} ➔ {String(row.check_out).substring(0, 10)}</td>
                     <td className="px-3 py-2 font-mono font-semibold text-zinc-800">{row.rooms_booked} rm</td>
                     <td className="px-3 py-2 font-mono font-bold text-emerald-700">₹{Number(row.total_amount || 0).toLocaleString()}</td>
+                  </tr>
+                ))}
+
+                {selectedTable === 'Ota_exeinfo' && (current.sourceRows as any[]).map((row, idx) => (
+                  <tr key={idx} className="hover:bg-amber-50/40 transition">
+                    <td className="px-3 py-2 font-mono font-bold text-zinc-900">{row.otaexesysdate}</td>
+                    <td className="px-3 py-2 font-mono text-zinc-700">{row.otaexesystime}</td>
+                    <td className="px-3 py-2">
+                      {row.workingstate === 1 ? (
+                        <span className="px-2 py-0.5 rounded text-[10px] font-semibold bg-emerald-100 text-emerald-800 inline-flex items-center gap-1">
+                          ● Working (1)
+                        </span>
+                      ) : (
+                        <span className="px-2 py-0.5 rounded text-[10px] font-semibold bg-red-100 text-red-800 inline-flex items-center gap-1">
+                          ▲ Not Working ({row.notworkingstate})
+                        </span>
+                      )}
+                    </td>
+                    <td className="px-3 py-2 text-zinc-800 font-medium max-w-[200px] truncate" title={row.otaexeinfo}>
+                      {row.otaexeinfo}
+                    </td>
+                    <td className="px-3 py-2 font-mono">
+                      <span className={`px-1.5 py-0.5 rounded text-[10px] ${row.infoscrollflg === 1 ? 'bg-amber-100 text-amber-800 font-bold' : 'bg-zinc-100 text-zinc-500'}`}>
+                        {row.infoscrollflg}
+                      </span>
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -464,6 +621,13 @@ export const DataParityInspector: React.FC<DataParityInspectorProps> = ({
                     <th className="px-3 py-2">total_amount</th>
                   </tr>
                 )}
+                {selectedTable === 'Ota_exeinfo' && (
+                  <tr>
+                    <th className="px-3 py-2">Field</th>
+                    <th className="px-3 py-2">Current Value</th>
+                    <th className="px-3 py-2">PMS Function / Description</th>
+                  </tr>
+                )}
               </thead>
               <tbody className="divide-y divide-zinc-100">
                 {selectedTable === 'mas_hotel' && (current.targetRows as any[]).map((row, idx) => (
@@ -527,6 +691,43 @@ export const DataParityInspector: React.FC<DataParityInspectorProps> = ({
                     <td className="px-3 py-2 font-mono font-bold text-emerald-700">₹{Number(row.total_amount || 0).toLocaleString()}</td>
                   </tr>
                 ))}
+
+                {selectedTable === 'Ota_exeinfo' && (
+                  <>
+                    <tr className="hover:bg-amber-50/40 transition">
+                      <td className="px-3 py-2 font-mono font-bold text-zinc-800">otaexesysdate</td>
+                      <td className="px-3 py-2 font-mono text-zinc-900">{(current.sourceRows[0] as any)?.otaexesysdate || '-'}</td>
+                      <td className="px-3 py-2 text-zinc-500 text-[11px]">System Date of last status ping</td>
+                    </tr>
+                    <tr className="hover:bg-amber-50/40 transition">
+                      <td className="px-3 py-2 font-mono font-bold text-zinc-800">otaexesystime</td>
+                      <td className="px-3 py-2 font-mono text-zinc-900">{(current.sourceRows[0] as any)?.otaexesystime || '-'}</td>
+                      <td className="px-3 py-2 text-zinc-500 text-[11px]">System Time of last status ping</td>
+                    </tr>
+                    <tr className="hover:bg-amber-50/40 transition">
+                      <td className="px-3 py-2 font-mono font-bold text-zinc-800">otaexeinfo</td>
+                      <td className="px-3 py-2 font-medium text-zinc-900 max-w-[180px] truncate" title={(current.sourceRows[0] as any)?.otaexeinfo}>
+                        {(current.sourceRows[0] as any)?.otaexeinfo || '-'}
+                      </td>
+                      <td className="px-3 py-2 text-zinc-500 text-[11px]">Ticker message shown on PMS desktop bar</td>
+                    </tr>
+                    <tr className="hover:bg-amber-50/40 transition">
+                      <td className="px-3 py-2 font-mono font-bold text-zinc-800">workingstate</td>
+                      <td className="px-3 py-2 font-mono font-bold text-emerald-700">{(current.sourceRows[0] as any)?.workingstate ?? 1}</td>
+                      <td className="px-3 py-2 text-zinc-500 text-[11px]">1 = Running normally, 0 = Inactive</td>
+                    </tr>
+                    <tr className="hover:bg-amber-50/40 transition">
+                      <td className="px-3 py-2 font-mono font-bold text-zinc-800">notworkingstate</td>
+                      <td className="px-3 py-2 font-mono font-bold text-red-700">{(current.sourceRows[0] as any)?.notworkingstate ?? 0}</td>
+                      <td className="px-3 py-2 text-zinc-500 text-[11px]">1 = Network issue / Service stopped</td>
+                    </tr>
+                    <tr className="hover:bg-amber-50/40 transition">
+                      <td className="px-3 py-2 font-mono font-bold text-zinc-800">infoscrollflg</td>
+                      <td className="px-3 py-2 font-mono font-bold text-amber-700">{(current.sourceRows[0] as any)?.infoscrollflg ?? 0}</td>
+                      <td className="px-3 py-2 text-zinc-500 text-[11px]">1 = Scroll alert on PMS reception marquee</td>
+                    </tr>
+                  </>
+                )}
               </tbody>
             </table>
           </div>

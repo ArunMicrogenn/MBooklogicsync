@@ -148,6 +148,16 @@ interface ReservationPerDayRow {
   _synced_at?: string;
 }
 
+interface OtaExeInfoRow {
+  otaexesysdate: string;
+  otaexesystime: string;
+  otaexeinfo: string;
+  notworkingstate: number;
+  workingstate: number;
+  infoscrollflg: number;
+  last_updated?: string;
+}
+
 // Initial Local SQL Server data
 const initialCustomers: CustomerRow[] = [
   { CustomerID: 1001, FirstName: 'Alexander', LastName: 'Wright', Email: 'a.wright@apextech.io', Phone: '+1-206-555-0192', CreditLimit: 25000.00, IsActive: true, CreatedAt: '2026-01-10T08:30:00Z', ModifiedAt: '2026-01-10T08:30:00Z' },
@@ -256,6 +266,17 @@ const state = {
     reservations_details_booklogic: [] as ReservationDetailRow[],
     Reservation_PerDay_details_Booklogic: [] as ReservationPerDayRow[],
     reservation_Customer_booklogic: [] as ReservationCustomerRow[],
+    Ota_exeinfo: [
+      {
+        otaexesysdate: new Date().toISOString().split('T')[0],
+        otaexesystime: new Date().toTimeString().split(' ')[0],
+        otaexeinfo: 'BookLogic Sync Service Running Normally',
+        notworkingstate: 0,
+        workingstate: 1,
+        infoscrollflg: 0,
+        last_updated: new Date().toISOString(),
+      }
+    ] as OtaExeInfoRow[],
   },
   // Data in Virtual Server PostgreSQL (mirrored target in BOOKLOGIC)
   virtualServerPostgres: {
@@ -1341,6 +1362,63 @@ async function startServer() {
         sourceRows: state.localSqlServer.reservation_Customer_booklogic,
         targetRows: state.virtualServerPostgres.reservation_Customer,
       },
+      Ota_exeinfo: {
+        tableName: 'Ota_exeinfo',
+        sourceCount: state.localSqlServer.Ota_exeinfo.length,
+        targetCount: 1,
+        inSync: state.localSqlServer.Ota_exeinfo[0]?.workingstate === 1,
+        sourceRows: state.localSqlServer.Ota_exeinfo,
+        targetRows: state.localSqlServer.Ota_exeinfo,
+      },
+    });
+  });
+
+  // API: Get current Ota_exeinfo status (PMS Desktop Health Monitoring)
+  app.get('/api/ota-exeinfo', (req, res) => {
+    const current = state.localSqlServer.Ota_exeinfo[0] || {
+      otaexesysdate: new Date().toISOString().split('T')[0],
+      otaexesystime: new Date().toTimeString().split(' ')[0],
+      otaexeinfo: 'BookLogic Sync Service Running Normally',
+      notworkingstate: 0,
+      workingstate: 1,
+      infoscrollflg: 0,
+      last_updated: new Date().toISOString(),
+    };
+    res.json({ success: true, data: current });
+  });
+
+  // API: Update or Simulate Ota_exeinfo status
+  app.post('/api/ota-exeinfo', (req, res) => {
+    const {
+      otaexeinfo = 'BookLogic Sync Service Running Normally',
+      workingstate = 1,
+      notworkingstate = 0,
+      infoscrollflg = 0,
+      otaexesysdate,
+      otaexesystime,
+    } = req.body;
+
+    const now = new Date();
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const dateStr = otaexesysdate || `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+    const timeStr = otaexesystime || `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+
+    const updatedRow: OtaExeInfoRow = {
+      otaexesysdate: dateStr,
+      otaexesystime: timeStr,
+      otaexeinfo: String(otaexeinfo),
+      notworkingstate: Number(notworkingstate) ? 1 : 0,
+      workingstate: Number(workingstate) ? 1 : 0,
+      infoscrollflg: Number(infoscrollflg) ? 1 : 0,
+      last_updated: now.toISOString(),
+    };
+
+    state.localSqlServer.Ota_exeinfo = [updatedRow];
+
+    res.json({
+      success: true,
+      data: updatedRow,
+      message: `Ota_exeinfo updated: workingstate=${updatedRow.workingstate}, notworkingstate=${updatedRow.notworkingstate}, scroll=${updatedRow.infoscrollflg}`,
     });
   });
 
@@ -3201,6 +3279,7 @@ CREATE INDEX IF NOT EXISTS idx_roomavail_dates ON public.trans_roomavailability_
   app.get('/api/sync-agent.js', sendSyncAgent);
   app.get('/sync_agent.js', sendSyncAgent);
   app.get('/sync-agent.js', sendSyncAgent);
+  app.get('/api/download-sync-agent', sendSyncAgent);
   app.get('/test_mssql.js', sendTestMssql);
   app.get('/api/test_mssql.js', sendTestMssql);
   app.get('/api/download-test-mssql', sendTestMssql);

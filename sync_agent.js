@@ -621,6 +621,76 @@ async function loadSqlServerTableMetadata(pool) {
 }
 
 // --------------------------------------------------------------------------------------
+// OTA_EXEINFO TABLE STATUS UPDATER (PMS MONITORING TABLE)
+// --------------------------------------------------------------------------------------
+// Updates table dbo.Ota_exeinfo fields:
+// - otaexesysdate: current date (YYYY-MM-DD)
+// - otaexesystime: current time (HH:mm:ss)
+// - otaexeinfo: descriptive info/error message
+// - notworkingstate: 1 during network issue / service stopped, 0 when working normally
+// - workingstate: 1 when working normally, 0 during network issue / service stopped
+// - infoscrollflg: 1 when error/alert active, 0 when normal
+// --------------------------------------------------------------------------------------
+async function updateOtaExeInfo(infoText, working = 1, notWorking = 0, scrollFlg = 0) {
+  if (!mssqlPool || !mssqlPool.connected) {
+    return; // Cannot update local SQL Server if local database is not connected
+  }
+
+  try {
+    const now = new Date();
+    const pad = (n) => String(n).padStart(2, '0');
+    const dateStr = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+    const timeStr = `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+    const truncatedInfo = String(infoText || '').substring(0, 490);
+
+    const query = `
+      IF NOT EXISTS (SELECT * FROM sysobjects WHERE (name='Ota_exeinfo' OR name='ota_exeinfo') AND xtype='U')
+      BEGIN
+        CREATE TABLE dbo.Ota_exeinfo (
+          id INT IDENTITY(1,1) PRIMARY KEY,
+          otaexesysdate VARCHAR(30) NULL,
+          otaexesystime VARCHAR(30) NULL,
+          otaexeinfo VARCHAR(500) NULL,
+          notworkingstate INT DEFAULT 0,
+          workingstate INT DEFAULT 1,
+          infoscrollflg INT DEFAULT 0,
+          last_updated DATETIME DEFAULT GETDATE()
+        );
+      END
+
+      IF EXISTS (SELECT 1 FROM dbo.Ota_exeinfo)
+      BEGIN
+        UPDATE dbo.Ota_exeinfo
+        SET otaexesysdate = @sysdate,
+            otaexesystime = @systime,
+            otaexeinfo = @info,
+            notworkingstate = @notworking,
+            workingstate = @working,
+            infoscrollflg = @scrollflg;
+      END
+      ELSE
+      BEGIN
+        INSERT INTO dbo.Ota_exeinfo (otaexesysdate, otaexesystime, otaexeinfo, notworkingstate, workingstate, infoscrollflg)
+        VALUES (@sysdate, @systime, @info, @notworking, @working, @scrollflg);
+      END
+    `;
+
+    const req = mssqlPool.request();
+    req.input('sysdate', sql.VarChar(30), dateStr);
+    req.input('systime', sql.VarChar(30), timeStr);
+    req.input('info', sql.VarChar(500), truncatedInfo);
+    req.input('notworking', sql.Int, notWorking ? 1 : 0);
+    req.input('working', sql.Int, working ? 1 : 0);
+    req.input('scrollflg', sql.Int, scrollFlg ? 1 : 0);
+
+    await req.query(query);
+    log('info', `[Ota_exeinfo] Updated ➔ working:${working ? 1 : 0}, notworking:${notWorking ? 1 : 0}, scroll:${scrollFlg ? 1 : 0} | "${truncatedInfo}"`);
+  } catch (err) {
+    log('warn', `Failed to update Ota_exeinfo in SQL Server: ${err.message}`);
+  }
+}
+
+// --------------------------------------------------------------------------------------
 // VPS POSTGRESQL (STRICTLY BOOKLOGIC DATABASE) INITIALIZATION
 // --------------------------------------------------------------------------------------
 async function connectToPostgresBooklogic() {
@@ -646,6 +716,7 @@ async function connectToPostgresBooklogic() {
   try {
     client = await pgPool.connect();
     log('success', `Connected strictly to VPS PostgreSQL Database: "${PG_DATABASE}" (${PG_HOST}:${PG_PORT}).`);
+    await updateOtaExeInfo('BookLogic Sync Service Running Normally', 1, 0, 0);
 
     // Introspect tables inside BOOKLOGIC database
     const tRes = await client.query(`
@@ -792,6 +863,9 @@ async function connectToPostgresBooklogic() {
 
   } catch (err) {
     log('error', `VPS PostgreSQL BOOKLOGIC error: ${err.message}`);
+    try {
+      await updateOtaExeInfo(`Network issue: Cannot reach BookLogic VPS (${PG_HOST}:${PG_PORT}) - ${err.message}`, 0, 1, 1);
+    } catch (e) {}
     throw err;
   } finally {
     if (client) client.release();
@@ -1590,7 +1664,10 @@ async function syncInboundReservations() {
     return committedResIds.length;
   } catch (err) {
     log('error', `Inbound reservation sync error: ${err.message}`);
-    return 0;
+    try {
+      await updateOtaExeInfo(`Bookings Sync Error: ${err.message}`, 0, 1, 1);
+    } catch (e) {}
+    throw err;
   } finally {
     if (pgClient) pgClient.release();
   }
@@ -1719,7 +1796,10 @@ async function syncOutboundRoomAvailability() {
     return syncedAvaids.length;
   } catch (err) {
     log('error', `Outbound Room Availability error: ${err.message}`);
-    return 0;
+    try {
+      await updateOtaExeInfo(`Room Inventory Update Error: ${err.message}`, 0, 1, 1);
+    } catch (e) {}
+    throw err;
   } finally {
     if (pgClient) pgClient.release();
   }
@@ -1831,19 +1911,28 @@ async function syncOutboundRoomRates() {
     return syncedRateIds.length;
   } catch (err) {
     log('error', `Outbound Room Rate Updates error: ${err.message}`);
-    return 0;
+    try {
+      await updateOtaExeInfo(`Room Rate Update Error: ${err.message}`, 0, 1, 1);
+    } catch (e) {}
+    throw err;
   } finally {
     if (pgClient) pgClient.release();
   }
 }
 
 // Global safety guards to prevent service from ever stopping on unhandled errors
-process.on('uncaughtException', (err) => {
+process.on('uncaughtException', async (err) => {
   log('error', `[WATCHDOG] Uncaught Exception caught: ${err.message}`, err.stack);
+  try {
+    await updateOtaExeInfo(`Sync Service Error: ${err.message}`, 0, 1, 1);
+  } catch (e) {}
 });
 
-process.on('unhandledRejection', (reason, promise) => {
+process.on('unhandledRejection', async (reason, promise) => {
   log('error', `[WATCHDOG] Unhandled Promise Rejection: ${reason}`);
+  try {
+    await updateOtaExeInfo(`Network / Promise Rejection: ${reason}`, 0, 1, 1);
+  } catch (e) {}
 });
 
 // --------------------------------------------------------------------------------------
@@ -1868,11 +1957,12 @@ async function runReplicationCycle() {
 
     // Check & ensure PostgreSQL connection is active
     if (!pgPool) {
-      log('warn', `PostgreSQL connection lost. Re-connecting...`);
+      log('warn', `PostgreSQL connection lost. Re-connecting to VPS...`);
       try {
         await connectToPostgresBooklogic();
       } catch (pgConnErr) {
         log('error', `PostgreSQL re-connection failed: ${pgConnErr.message}`);
+        await updateOtaExeInfo(`Network issue: Cannot connect to BookLogic VPS (${PG_HOST}:${PG_PORT})`, 0, 1, 1);
         return;
       }
     }
@@ -1887,8 +1977,16 @@ async function runReplicationCycle() {
     if (inCount > 0 || outAvail > 0 || outRates > 0) {
       log('info', `Cycle #${cycleCount} complete: 📥 ${inCount} Inbound Reservation(s) (4 tables) | 📤 ${outAvail} Availability + ${outRates} Rates.`);
     }
+
+    // Healthy cycle: update Ota_exeinfo to workingstate = 1, notworkingstate = 0, infoscrollflg = 0
+    await updateOtaExeInfo('BookLogic Sync Service Running Normally', 1, 0, 0);
+
   } catch (err) {
     log('error', `Replication cycle error (auto-recovering in next cycle): ${err.message}`);
+    const msg = err.message || '';
+    if (!msg.startsWith('Bookings Sync Error') && !msg.startsWith('Room Inventory Update Error') && !msg.startsWith('Room Rate Update Error') && !msg.startsWith('Network issue')) {
+      await updateOtaExeInfo(`Sync Error: ${msg}`, 0, 1, 1);
+    }
   } finally {
     isSyncRunning = false;
   }
@@ -1917,6 +2015,9 @@ async function startReplicationAgent() {
         log('info', `Hotel Code Filter : ALL (Unfiltered / Syncing all pending bookings)`);
       }
 
+      // Initial status update in Ota_exeinfo
+      await updateOtaExeInfo('BookLogic Sync Service Started and Running Normally', 1, 0, 0);
+
       // Run first cycle immediately
       await runReplicationCycle();
 
@@ -1936,6 +2037,9 @@ async function startReplicationAgent() {
 
     } catch (err) {
       log('error', `[WATCHDOG] Connection or startup error: ${err.message}. Retrying connection in 10 seconds...`);
+      // Update Ota_exeinfo on connection or startup failure
+      await updateOtaExeInfo(`Network / Connection Error: ${err.message}. Retrying...`, 0, 1, 1);
+
       try { if (mssqlPool) await mssqlPool.close(); } catch (e) {}
       try { if (pgPool) await pgPool.end(); } catch (e) {}
       mssqlPool = null;
@@ -1947,12 +2051,23 @@ async function startReplicationAgent() {
   }
 }
 
-// Graceful shutdown
-process.on('SIGINT', async () => {
-  log('warn', 'Shutting down sync agent gracefully...');
+// Graceful shutdown & exit handlers
+let isShuttingDown = false;
+async function handleShutdown(signal) {
+  if (isShuttingDown) return;
+  isShuttingDown = true;
+  log('warn', `Shutting down sync agent (${signal}). Updating Ota_exeinfo table...`);
+  
+  try {
+    await updateOtaExeInfo(`BookLogic Sync Service Stopped (${signal})`, 0, 1, 1);
+  } catch (e) {}
+
   if (mssqlPool) try { await mssqlPool.close(); } catch (e) {}
   if (pgPool) try { await pgPool.end(); } catch (e) {}
   process.exit(0);
-});
+}
+
+process.on('SIGINT', () => handleShutdown('SIGINT / Manual Stop'));
+process.on('SIGTERM', () => handleShutdown('SIGTERM / Service Stop'));
 
 startReplicationAgent();

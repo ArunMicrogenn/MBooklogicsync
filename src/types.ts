@@ -153,3 +153,14 @@ export interface ReservationCustomerRecord {
   id_proof_number?: string;
 }
 
+export interface OtaExeInfo {
+  otaexesysdate: string;
+  otaexesystime: string;
+  otaexeinfo: string;
+  notworkingstate: number;
+  workingstate: number;
+  infoscrollflg: number;
+  last_updated?: string;
+}
+
+
